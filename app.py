@@ -26,10 +26,13 @@ st.markdown("""
     div.stButton > button:first-child {
         background-color: #004B87; color: white; border-radius: 8px; font-weight: bold;
     }
+    .stDataFrame { border: 1px solid #ddd; border-radius: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
-# UPDATED SCOPES: Added 'profile' to get the user's real name
+# Define the Admin Email for CC
+ADMIN_EMAIL = "ali@kohani.com"
+
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/gmail.settings.basic',
@@ -39,7 +42,7 @@ SCOPES = [
 ]
 
 # ==========================================
-# 1. AUTHENTICATION (USER LOGIN)
+# 1. AUTHENTICATION
 # ==========================================
 def get_auth_flow():
     return Flow.from_client_config(
@@ -57,7 +60,6 @@ def get_auth_flow():
     )
 
 def authenticate_user():
-    """Handles Google Login and fetches Name + Email"""
     if "code" in st.query_params:
         try:
             code = st.query_params["code"]
@@ -65,12 +67,11 @@ def authenticate_user():
             flow.fetch_token(code=code)
             st.session_state.creds = flow.credentials
             
-            # Fetch User Profile (Name & Email)
             user_info_service = build('oauth2', 'v2', credentials=st.session_state.creds)
             user_info = user_info_service.userinfo().get().execute()
             
             st.session_state.user_email = user_info.get('email')
-            st.session_state.user_name = user_info.get('name') # This gets "Miranda Kohani"
+            st.session_state.user_name = user_info.get('name')
             
             st.query_params.clear()
             st.rerun()
@@ -90,20 +91,17 @@ def authenticate_user():
     return False
 
 # ==========================================
-# 2. GMAIL FUNCTIONS (ANTI-SPAM VERSION)
+# 2. GMAIL FUNCTIONS (FIXED CC)
 # ==========================================
 def get_gmail_service():
     if "creds" not in st.session_state: return None
     return build('gmail', 'v1', credentials=st.session_state.creds)
 
 def get_user_signature():
-    """Fetches real HTML signature"""
     try:
         service = get_gmail_service()
-        # 'me' refers to the authenticated user
         sendas_list = service.users().settings().sendAs().list(userId='me').execute()
         for alias in sendas_list.get('sendAs', []):
-            # We look for the primary address or the one matching the login
             if alias.get('isPrimary') or alias.get('sendAsEmail') == st.session_state.user_email:
                 return alias.get('signature', '') 
         return ""
@@ -112,33 +110,28 @@ def get_user_signature():
 
 def send_email_as_user(to_email, subject, body_text, body_html):
     """
-    Sends a 'Multipart' email.
-    This creates both a Plain Text version (for anti-spam)
-    and an HTML version (for the Signature).
+    Sends email as the logged-in user and CCs the Admin.
     """
     try:
         service = get_gmail_service()
-        
-        # Create Multipart Message (Best practice for delivery)
         message = MIMEMultipart('alternative')
         
-        # PROPER FROM HEADER: "Miranda Kohani <miranda@kohani.com>"
-        # This prevents the "unknown sender" look
         sender_header = f"{st.session_state.user_name} <{st.session_state.user_email}>"
         
         message['to'] = to_email
         message['from'] = sender_header 
+        
+        # --- THE FIX: ADD CC HEADER ---
+        message['cc'] = ADMIN_EMAIL 
+        
         message['subject'] = subject
         
-        # Attach Plain Text (Anti-Spam fallback)
         part1 = MIMEText(body_text, 'plain')
-        # Attach HTML (Actual view with Signature)
         part2 = MIMEText(body_html, 'html')
         
         message.attach(part1)
         message.attach(part2)
         
-        # Encode and Send
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         body = {'raw': raw}
         
@@ -149,7 +142,7 @@ def send_email_as_user(to_email, subject, body_text, body_html):
         return False
 
 # ==========================================
-# 3. DATABASE FUNCTIONS
+# 3. DATABASE FUNCTIONS (CACHED)
 # ==========================================
 def get_db_client():
     if "connections" not in st.secrets:
@@ -162,6 +155,7 @@ def get_db_client():
     creds = Credentials.from_service_account_info(secrets_dict, scopes=scopes)
     return gspread.authorize(creds)
 
+@st.cache_data(ttl=600) 
 def get_data(worksheet_name="Clients"):
     try:
         client = get_db_client()
@@ -172,8 +166,8 @@ def get_data(worksheet_name="Clients"):
             ws = sh.worksheet(worksheet_name)
         except:
             if worksheet_name == "Templates": return pd.DataFrame(columns=['Type', 'Subject', 'Body'])
-            st.error(f"Tab '{worksheet_name}' not found.")
             return pd.DataFrame()
+            
         raw_data = ws.get_all_values()
         if not raw_data: return pd.DataFrame()
         headers = raw_data[0]
@@ -191,7 +185,6 @@ def get_data(worksheet_name="Clients"):
             df['Status'] = df['Status'].replace("", "New")
         return df
     except Exception as e:
-        st.error(f"DB Error: {e}")
         return pd.DataFrame()
 
 def update_data(df, worksheet_name="Clients"):
@@ -203,6 +196,7 @@ def update_data(df, worksheet_name="Clients"):
         ws = sh.worksheet(worksheet_name)
         ws.clear()
         ws.update([df.columns.values.tolist()] + df.values.tolist())
+        get_data.clear() # Clear cache
     except Exception as e:
         st.error(f"Save Error: {e}")
 
@@ -214,17 +208,11 @@ def clean_text(text):
 # 4. VIEW: TEAM MEMBER
 # ==========================================
 def render_team_view(df, templates, user_email):
-    
     with st.sidebar:
-        # Display Name + Email
         user_name = st.session_state.get('user_name', user_email)
         st.write(f"👤 **{user_name}**")
-        st.caption(f"({user_email})")
-        
         if st.button("Logout"):
-            del st.session_state.creds
-            del st.session_state.user_email
-            st.rerun()
+            del st.session_state.creds; del st.session_state.user_email; st.rerun()
             
         st.markdown("---")
         st.subheader("🔍 Search & Edit")
@@ -307,17 +295,9 @@ def render_team_view(df, templates, user_email):
                         subj = templates[templates['Type'] == tmplt]['Subject'].values[0]
                         
                         sig = get_user_signature()
-                        if not sig: st.caption("⚠️ No HTML signature found in Gmail settings. Email will be plain.")
-                        
                         disp_name = new_tp_first if new_tp_first else "Client"
-                        # Text for edit (plain)
                         body_edit = st.text_area("Edit Message", value=raw_body.replace("{Name}", disp_name), height=150)
-                        
-                        # Prepare Final versions
-                        final_text = body_edit # Plain text version (No Sig)
-                        
-                        # HTML Version (Body + Sig)
-                        # We convert newlines to <br> so they show up in HTML
+                        final_text = body_edit
                         final_html = f"{body_edit.replace(chr(10), '<br>')}<br><br>{sig}"
                 else:
                     st.warning("No templates.")
@@ -352,7 +332,7 @@ def render_team_view(df, templates, user_email):
                 st.rerun()
 
 # ==========================================
-# 5. VIEW: ADMIN
+# 5. VIEW: ADMIN DASHBOARD
 # ==========================================
 def render_admin_view(df, templates, user_email):
     st.title("🔒 Admin Dashboard")
@@ -369,40 +349,52 @@ def render_admin_view(df, templates, user_email):
     with tab1:
         st.subheader("Clients Waiting for Manager Email")
         targets = df[(df['Outcome'] == 'Yes') & (df['Status'] != 'Manager Emailed')]
+        
         if targets.empty:
-            st.success("Inbox Zero!")
+            st.success("✅ Inbox Zero!")
         else:
-            st.dataframe(targets[['Name', 'Home Telephone', 'Outcome', 'Notes']])
+            st.info("👆 Click a row to email that client.")
+            event = st.dataframe(
+                targets[['Name', 'Home Telephone', 'Outcome', 'Notes']],
+                on_select="rerun",
+                selection_mode="single-row",
+                use_container_width=True
+            )
             
-            st.write("### Send Manager Follow-up")
-            opts = targets['Name'] + " (" + targets['ID'].astype(str) + ")"
-            sel_label = st.selectbox("Select Client", opts)
-            
-            if sel_label:
-                sel_id = sel_label.split("(")[1].replace(")", "")
-                client = targets[targets['ID'] == sel_id].iloc[0]
+            if len(event.selection.rows) > 0:
+                row_idx = event.selection.rows[0]
+                client_id = targets.iloc[row_idx]['ID']
+                client = targets[targets['ID'] == client_id].iloc[0]
+                
+                st.markdown("---")
+                st.markdown(f"### 📤 Compose Email to: {client['Name']}")
                 
                 if not templates.empty:
-                    t_type = 'Manager Follow-up' if 'Manager Follow-up' in templates['Type'].values else templates['Type'].iloc[0]
-                    t_row = templates[templates['Type'] == t_type].iloc[0]
+                    t_options = templates['Type'].unique().tolist()
+                    default_idx = t_options.index('Manager Follow-up') if 'Manager Follow-up' in t_options else 0
+                    selected_template = st.selectbox("Select Template", t_options, index=default_idx)
+                    
+                    t_row = templates[templates['Type'] == selected_template].iloc[0]
+                    f_name = clean_text(client.get('Taxpayer First Name')) or "Client"
+                    body_text = t_row['Body'].replace("{Name}", f_name)
                     subj = t_row['Subject']
-                    raw_body = t_row['Body']
-                    f_name = client.get('Taxpayer First Name') if client.get('Taxpayer First Name') else "Client"
                     
-                    # Edit plain text
-                    final_text = st.text_area("Message", value=raw_body.replace("{Name}", str(f_name)), height=150)
+                    final_subj = st.text_input("Subject", value=subj)
+                    final_text = st.text_area("Message Body", value=body_text, height=200)
                     
-                    if st.button("🚀 Send"):
-                         sig = get_user_signature()
-                         final_html = f"{final_text.replace(chr(10), '<br>')}<br><br>{sig}"
-                         
-                         if send_email_as_user(client['Taxpayer E-mail Address'], subj, final_text, final_html):
-                             idx = df.index[df['ID'] == client['ID']][0]
-                             df.at[idx, 'Status'] = "Manager Emailed"
-                             update_data(df, "Clients")
-                             st.success("Sent!")
-                             time.sleep(1)
-                             st.rerun()
+                    if st.button("🚀 Send Email", type="primary"):
+                        sig = get_user_signature()
+                        final_html = f"{final_text.replace(chr(10), '<br>')}<br><br>{sig}"
+                        
+                        if send_email_as_user(client['Taxpayer E-mail Address'], final_subj, final_text, final_html):
+                            idx = df.index[df['ID'] == client['ID']][0]
+                            df.at[idx, 'Status'] = "Manager Emailed"
+                            update_data(df, "Clients")
+                            st.success("Email Sent & Archived!")
+                            time.sleep(1)
+                            st.rerun()
+                else:
+                    st.error("No templates found in database.")
 
     with tab2:
         st.subheader("All Call Logs")
@@ -417,12 +409,10 @@ if not authenticate_user():
     with c2:
         st.image("https://kohani.com/wp-content/uploads/2015/05/logo.png", width=200)
         st.title("Kohani CRM Login")
-        st.info("Sign in with your @kohani.com Gmail")
         
         flow = get_auth_flow()
         auth_url, _ = flow.authorization_url(prompt='consent')
         st.link_button("🔵 Sign in with Google", auth_url, type="primary")
-
 else:
     user_email = st.session_state.user_email
     role = "Admin" if ("ali" in user_email or "admin" in user_email) else "Staff"
