@@ -9,13 +9,15 @@ from email.mime.multipart import MIMEMultipart
 import time
 import socket
 
-# Force timeout so it doesn't hang on firewalls
+# Force timeout for firewalls
 socket.setdefaulttimeout(30)
 
 # ==========================================
-# 1. CONFIG & STYLE
+# 1. CONFIG
 # ==========================================
 st.set_page_config(page_title="Kohani CRM", page_icon="📊", layout="wide")
+
+# CSS: Hides the default menu but DOES NOT change input colors (fixes the white text issue)
 st.markdown("""
     <style>
     #MainMenu {display: none;}
@@ -23,14 +25,11 @@ st.markdown("""
     div.stButton > button:first-child {
         background-color: #004B87; color: white; border-radius: 8px; font-weight: bold;
     }
-    .stTextInput input {
-        background-color: #f0f2f6;
-    }
     </style>
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. ROBUST GOOGLE CONNECTION
+# 2. GOOGLE CONNECTION
 # ==========================================
 def get_google_client():
     if "connections" not in st.secrets:
@@ -49,7 +48,6 @@ def get_data(worksheet_name="Clients"):
     try:
         client = get_google_client()
         raw_input = st.secrets["connections"]["gsheets"]["spreadsheet"]
-        # Clean ID
         sheet_id = raw_input.replace("https://docs.google.com/spreadsheets/d/", "").split("/")[0].strip()
         
         sh = client.open_by_key(sheet_id)
@@ -126,7 +124,6 @@ def send_email_via_gmail(to_email, subject, body):
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(sender_email, password)
-        # Send to client + CC admin
         server.send_message(msg, to_addrs=[to_email, admin_email])
         server.quit()
         return True
@@ -176,177 +173,175 @@ def render_team_view():
         st.warning("Client list is loading or empty...")
         return
 
-    # Header Stats
-    completed = len(df[df['Status'] != 'New'])
-    st.progress(completed / len(df), text=f"Progress: {completed}/{len(df)} Contacted")
-    
-    t1, t2 = st.tabs(["📞 Client Card", "🔎 Search & Edit"])
-    
-    # -------------------------------------
-    # TAB 1: FOCUS MODE (DEAL CARDS)
-    # -------------------------------------
-    with t1:
-        # If no active client, show "Deal" button
-        if 'current_id' not in st.session_state or st.session_state.current_id is None:
-            queue = df[df['Status'] == 'New']
-            st.info(f"Clients remaining to call: **{len(queue)}**")
-            
-            if queue.empty:
-                st.success("🎉 All new clients called!")
-            else:
-                if st.button("📞 START NEXT CALL", type="primary", use_container_width=True):
-                    client = queue.sample(1).iloc[0]
-                    st.session_state.current_id = client['ID']
-                    st.rerun()
+    # --- SIDEBAR: NAVIGATION & SEARCH ---
+    with st.sidebar:
+        st.write(f"👤 **{st.session_state.user}**")
+        if st.button("Logout"):
+            st.session_state.user = None; st.rerun()
         
-        # ACTIVE CLIENT CARD
-        if st.session_state.get('current_id'):
-            # Find the row index for this ID
-            mask = df['ID'] == st.session_state.current_id
-            if not mask.any():
+        st.markdown("---")
+        st.subheader("🔍 Search Database")
+        search_term = st.text_input("Find Client (Name/Phone)")
+        
+        if search_term:
+            # Filter results
+            res = df[
+                df['Name'].astype(str).str.contains(search_term, case=False, na=False) |
+                df['Home Telephone'].astype(str).str.contains(search_term, case=False, na=False)
+            ]
+            if not res.empty:
+                st.write(f"Found {len(res)}:")
+                # Create label for dropdown
+                res['Label'] = res['Name'] + " (" + res['Status'] + ")"
+                target_label = st.selectbox("Select Result", res['Label'])
+                
+                # Get ID from selection
+                target_id = res[res['Label'] == target_label]['ID'].values[0]
+                
+                if st.button("📂 LOAD CLIENT CARD"):
+                    st.session_state.current_id = target_id
+                    st.rerun()
+            else:
+                st.warning("No matches.")
+
+        st.markdown("---")
+        # Stats
+        completed = len(df[df['Status'] != 'New'])
+        st.progress(completed / len(df), text=f"{completed}/{len(df)} Calls Done")
+
+
+    # --- MAIN CONTENT AREA ---
+    
+    # Check "Current Call" State
+    if 'current_id' not in st.session_state:
+        st.session_state.current_id = None
+        
+    # 1. NO ACTIVE CLIENT -> SHOW START BUTTON
+    if st.session_state.current_id is None:
+        queue = df[df['Status'] == 'New']
+        st.title("📞 Call Queue")
+        st.info(f"Clients remaining to call: **{len(queue)}**")
+        
+        if queue.empty:
+            st.success("🎉 All new clients called!")
+        else:
+            if st.button("📞 START NEXT CALL", type="primary"):
+                client = queue.sample(1).iloc[0]
+                st.session_state.current_id = client['ID']
+                st.rerun()
+
+    # 2. ACTIVE CLIENT CARD
+    else:
+        # Find the row index
+        mask = df['ID'] == st.session_state.current_id
+        if not mask.any():
+            st.session_state.current_id = None
+            st.rerun()
+        
+        idx = df.index[mask][0]
+        client = df.loc[idx]
+        
+        with st.container(border=True):
+            # Header
+            c_h1, c_h2 = st.columns([3,1])
+            c_h1.title(f"{client['Name']}")
+            c_h2.metric("Status", client['Status'])
+            
+            # --- EDITABLE DETAILS ---
+            with st.expander("📝 Edit Client Details (Open to Edit)", expanded=True):
+                # Using .get() ensures it doesn't crash if column names differ slightly
+                c1, c2 = st.columns(2)
+                # First Names
+                new_tp_first = c1.text_input("Taxpayer First Name", value=client.get('Taxpayer First Name', ''))
+                new_sp_first = c2.text_input("Spouse First Name", value=client.get('Spouse First Name', ''))
+                
+                # Last Names
+                c3, c4 = st.columns(2)
+                new_tp_last = c3.text_input("Taxpayer Last Name", value=client.get('Taxpayer last name', ''))
+                new_sp_last = c4.text_input("Spouse Last Name", value=client.get('Spouse last name', ''))
+                
+                # Contact
+                c5, c6 = st.columns(2)
+                new_phone = c5.text_input("Home Telephone", value=client.get('Home Telephone', ''))
+                new_email = c6.text_input("Taxpayer Email", value=client.get('Taxpayer E-mail Address', ''))
+
+            # --- NOTES & HISTORY ---
+            st.markdown("### 📜 Notes")
+            current_notes = str(client.get('Notes', ''))
+            st.text_area("History", value=current_notes, disabled=True, height=100)
+            new_note_input = st.text_area("➕ Add Call Summary / Note")
+
+            st.markdown("---")
+
+            # --- OUTCOME ---
+            c_out1, c_out2 = st.columns(2)
+            res = c_out1.selectbox("Call Result", ["Left Message", "Talked", "Wrong Number"])
+            dec = c_out2.selectbox("Decision", ["Pending", "Yes", "No", "Maybe"])
+            flag = st.checkbox("🚩 Internal Follow-up Required")
+
+            # --- EMAIL SECTION ---
+            st.markdown("### 📧 Follow-up Email")
+            send_email_check = st.checkbox(f"Send email to: {new_email}")
+            
+            final_body = ""
+            email_template_name = None
+            
+            if send_email_check:
+                if not templates.empty:
+                    email_template_name = st.selectbox("Choose Template", templates['Type'].unique())
+                    # Load Body
+                    raw_body = templates[templates['Type'] == email_template_name]['Body'].values[0]
+                    # Replace Name Logic
+                    display_name = new_tp_first if new_tp_first else "Client"
+                    final_body = raw_body.replace("{Name}", display_name)
+                    # Editor
+                    final_body = st.text_area("Edit Message", value=final_body, height=150)
+                else:
+                    st.warning("No templates found in Google Sheets.")
+
+            # --- SAVE BAR ---
+            b1, b2 = st.columns([1, 4])
+            
+            if b2.button("💾 SAVE CHANGES & FINISH", type="primary", use_container_width=True):
+                # 1. Update Details
+                df.at[idx, 'Taxpayer First Name'] = new_tp_first
+                df.at[idx, 'Taxpayer last name'] = new_tp_last
+                df.at[idx, 'Spouse First Name'] = new_sp_first
+                df.at[idx, 'Spouse last name'] = new_sp_last
+                df.at[idx, 'Home Telephone'] = new_phone
+                df.at[idx, 'Taxpayer E-mail Address'] = new_email
+                
+                # 2. Update CRM
+                df.at[idx, 'Status'] = res
+                df.at[idx, 'Outcome'] = dec
+                df.at[idx, 'Internal_Flag'] = "TRUE" if flag else "FALSE"
+                df.at[idx, 'Last_Agent'] = st.session_state.user
+                df.at[idx, 'Last_Updated'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                
+                # 3. Append Note
+                if new_note_input:
+                    ts = datetime.now().strftime("%m/%d")
+                    df.at[idx, 'Notes'] = current_notes + f"\n[{ts} {st.session_state.user}]: {new_note_input}"
+
+                # 4. Send Email
+                if send_email_check and new_email:
+                    subject = templates[templates['Type'] == email_template_name]['Subject'].values[0]
+                    if send_email_via_gmail(new_email, subject, final_body):
+                        st.toast(f"Email sent to {new_email}", icon="📧")
+                
+                # 5. Save
+                with st.spinner("Saving..."):
+                    update_data(df, "Clients")
+                
+                if dec == "Yes": st.balloons()
+                st.success("Saved!")
+                time.sleep(1)
                 st.session_state.current_id = None
                 st.rerun()
-            
-            idx = df.index[mask][0]
-            client = df.loc[idx]
-            
-            with st.container(border=True):
-                # HEADER
-                c_head1, c_head2 = st.columns([3,1])
-                c_head1.subheader(f"👤 {client['Name']}")
-                c_head2.info(f"Status: {client['Status']}")
-                
-                # --- EDITABLE FORM (NAME, PHONE, EMAIL) ---
-                with st.expander("📝 Edit Client Details (Open to Edit)", expanded=True):
-                    # Use .get() safely
-                    
-                    c1, c2 = st.columns(2)
-                    new_tp_first = c1.text_input("Taxpayer First Name", value=client.get('Taxpayer First Name', ''))
-                    new_tp_last = c2.text_input("Taxpayer Last Name", value=client.get('Taxpayer last name', ''))
-                    
-                    c3, c4 = st.columns(2)
-                    new_sp_first = c3.text_input("Spouse First Name", value=client.get('Spouse First Name', ''))
-                    new_sp_last = c4.text_input("Spouse Last Name", value=client.get('Spouse last name', ''))
 
-                    c5, c6 = st.columns(2)
-                    new_phone = c5.text_input("Home Telephone", value=client.get('Home Telephone', ''))
-                    new_email = c6.text_input("Taxpayer Email", value=client.get('Taxpayer E-mail Address', ''))
-                
-                # --- NOTES ---
-                current_notes = str(client.get('Notes', ''))
-                st.text_area("📜 History / Previous Notes", value=current_notes, disabled=True, height=100)
-                new_note_input = st.text_area("➕ Add Call Note")
-
-                st.write("---")
-                
-                # --- OUTCOME ---
-                c_out1, c_out2 = st.columns(2)
-                res = c_out1.selectbox("Call Result", ["Left Message", "Talked", "Wrong Number"])
-                dec = c_out2.selectbox("Decision", ["Pending", "Yes", "No", "Maybe"])
-                flag = st.checkbox("🚩 Internal Follow-up Required")
-
-                # --- EMAIL SENDER ---
-                st.write("### 📧 Send Follow-up")
-                st.info("Check the box below to generate a pre-written email to this client.")
-                send_email_check = st.checkbox(f"Compose email to: {new_email}")
-                
-                final_body = ""
-                email_template_name = None
-                
-                if send_email_check:
-                    if not templates.empty:
-                        email_template_name = st.selectbox("Choose Template", templates['Type'].unique())
-                        
-                        # Load Body
-                        raw_body = templates[templates['Type'] == email_template_name]['Body'].values[0]
-                        # Replace Name
-                        display_name = new_tp_first if new_tp_first else "Client"
-                        final_body = raw_body.replace("{Name}", display_name)
-                        
-                        # Allow Editing
-                        final_body = st.text_area("Edit Email Body", value=final_body, height=200)
-                    else:
-                        st.warning("No templates found in 'Templates' tab.")
-
-                # --- SAVE BUTTONS ---
-                b1, b2 = st.columns([1, 4])
-                
-                if b2.button("💾 SAVE CHANGES & FINISH", type="primary", use_container_width=True):
-                    # 1. Update Details in DF
-                    df.at[idx, 'Taxpayer First Name'] = new_tp_first
-                    df.at[idx, 'Taxpayer last name'] = new_tp_last
-                    df.at[idx, 'Spouse First Name'] = new_sp_first
-                    df.at[idx, 'Spouse last name'] = new_sp_last
-                    df.at[idx, 'Home Telephone'] = new_phone
-                    df.at[idx, 'Taxpayer E-mail Address'] = new_email
-                    
-                    # 2. Update CRM Info
-                    df.at[idx, 'Status'] = res
-                    df.at[idx, 'Outcome'] = dec
-                    df.at[idx, 'Internal_Flag'] = "TRUE" if flag else "FALSE"
-                    df.at[idx, 'Last_Agent'] = st.session_state.user
-                    df.at[idx, 'Last_Updated'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    
-                    # 3. Append Notes
-                    if new_note_input:
-                        timestamp = datetime.now().strftime("%m/%d")
-                        df.at[idx, 'Notes'] = current_notes + f"\n[{timestamp} {st.session_state.user}]: {new_note_input}"
-
-                    # 4. Send Email
-                    if send_email_check and new_email:
-                        subject = templates[templates['Type'] == email_template_name]['Subject'].values[0]
-                        if send_email_via_gmail(new_email, subject, final_body):
-                            st.toast(f"Email sent to {new_email}", icon="📧")
-                    
-                    # 5. WRITE TO GOOGLE
-                    with st.spinner("Saving to Google Sheets..."):
-                        update_data(df, "Clients")
-                    
-                    if dec == "Yes": st.balloons()
-                    st.success("Saved successfully!")
-                    time.sleep(1)
-                    
-                    # Reset
-                    st.session_state.current_id = None
-                    st.rerun()
-
-                if b1.button("Cancel"):
-                    st.session_state.current_id = None
-                    st.rerun()
-
-    # -------------------------------------
-    # TAB 2: SEARCH & EDIT
-    # -------------------------------------
-    with t2:
-        st.subheader("Find and Edit a Client")
-        search = st.text_input("Search by Name, Phone, or Email")
-        
-        if search:
-            # Robust search
-            res = df[
-                df['Name'].astype(str).str.contains(search, case=False, na=False) |
-                df['Home Telephone'].astype(str).str.contains(search, case=False, na=False) |
-                df['Taxpayer E-mail Address'].astype(str).str.contains(search, case=False, na=False)
-            ]
-            
-            if not res.empty:
-                st.write(f"Found {len(res)} clients:")
-                # Show results
-                st.dataframe(res[['Name', 'Home Telephone', 'Status', 'Outcome']])
-                
-                # Selection Logic
-                client_options = res.apply(lambda x: f"{x['Name']} (ID: {x['ID']})", axis=1)
-                selected_option = st.selectbox("Select Client to Edit", client_options)
-                
-                if st.button("📝 LOAD THIS CLIENT"):
-                    # Extract ID from string "Name (ID: 123)"
-                    selected_id = int(selected_option.split("(ID: ")[1].replace(")", ""))
-                    
-                    # Set the active ID and switch tabs via Rerun
-                    st.session_state.current_id = selected_id
-                    st.rerun()
-            else:
-                st.warning("No matches found.")
+            if b1.button("Cancel"):
+                st.session_state.current_id = None
+                st.rerun()
 
 # ==========================================
 # 6. ADMIN VIEW
@@ -356,33 +351,21 @@ def render_admin_view():
     df = get_data("Clients")
     if df.empty: return
 
-    # Metrics
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Clients", len(df))
-    c2.metric("Pending Call", len(df[df['Status'] == 'New']))
-    c3.metric("Said YES", len(df[df['Outcome'] == 'Yes']))
+    c1.metric("Total", len(df))
+    c2.metric("Pending", len(df[df['Status'] == 'New']))
+    c3.metric("YES", len(df[df['Outcome'] == 'Yes']))
 
-    st.markdown("### 📥 Manager Follow-up Inbox")
+    st.markdown("### 📥 Inbox")
     targets = df[(df['Outcome'] == 'Yes') & (df['Status'] != 'Manager Emailed')]
-    
-    if targets.empty:
-        st.info("Inbox Zero! No pending follow-ups.")
-    else:
-        st.dataframe(targets[['Name', 'Taxpayer E-mail Address', 'Outcome', 'Notes']])
+    st.dataframe(targets[['Name', 'Taxpayer E-mail Address', 'Outcome', 'Notes']])
 
 # ==========================================
-# 7. MAIN ROUTER
+# 7. ROUTER
 # ==========================================
 if st.session_state.user is None:
     login_screen()
 else:
-    with st.sidebar:
-        st.write(f"Logged in: **{st.session_state.user}**")
-        if st.button("Logout"):
-            st.session_state.user = None
-            st.session_state.role = None
-            st.rerun()
-            
     if st.session_state.role == "Admin":
         render_admin_view()
     else:
