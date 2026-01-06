@@ -10,12 +10,18 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import datetime
 import time
+import socket
 import os
 
 # ==========================================
-# 1. CONFIG
+# 0. CONFIG & NETWORK SAFETY
 # ==========================================
+# Force timeout to prevent firewall hangs
+socket.setdefaulttimeout(30)
+
 st.set_page_config(page_title="Kohani CRM", page_icon="📊", layout="wide")
+
+# CSS: Clean UI (removed the white-text bug)
 st.markdown("""
     <style>
     #MainMenu {display: none;}
@@ -26,7 +32,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Scopes needed for User Login (Send email + Read signature)
+# Scopes for User Login (Send Email + Read Signature)
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/gmail.settings.basic',
@@ -34,10 +40,10 @@ SCOPES = [
 ]
 
 # ==========================================
-# 2. OAUTH / LOGIN FUNCTIONS
+# 1. AUTHENTICATION (USER LOGIN)
 # ==========================================
 def get_auth_flow():
-    """Creates the OAuth flow object using secrets"""
+    """Sets up the 'Sign in with Google' flow using client secrets"""
     return Flow.from_client_config(
         {
             "web": {
@@ -53,79 +59,86 @@ def get_auth_flow():
     )
 
 def authenticate_user():
-    """Handles the login logic (Redirect to Google)"""
-    # 1. If we have a code in URL, exchange it for credentials
+    """Handles the login logic"""
+    # 1. Handle Redirect Code from Google
     if "code" in st.query_params:
-        code = st.query_params["code"]
-        flow = get_auth_flow()
-        flow.fetch_token(code=code)
-        st.session_state.creds = flow.credentials
-        
-        # Get User Info
-        user_info_service = build('oauth2', 'v2', credentials=st.session_state.creds)
-        user_info = user_info_service.userinfo().get().execute()
-        st.session_state.user_email = user_info.get('email')
-        
-        # Clear the code from URL to clean up
-        st.query_params.clear()
-        st.rerun()
+        try:
+            code = st.query_params["code"]
+            flow = get_auth_flow()
+            flow.fetch_token(code=code)
+            st.session_state.creds = flow.credentials
+            
+            # Get User Email for Role Check
+            user_info_service = build('oauth2', 'v2', credentials=st.session_state.creds)
+            user_info = user_info_service.userinfo().get().execute()
+            st.session_state.user_email = user_info.get('email')
+            
+            # Cleanup URL
+            st.query_params.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Login Error: {e}")
+            return False
 
-    # 2. If valid creds exist, return True
+    # 2. Check if already logged in
     if "creds" in st.session_state:
-        # Check expiry
+        # Refresh token if expired
         if st.session_state.creds.expired and st.session_state.creds.refresh_token:
-            st.session_state.creds.refresh(Request())
+            try:
+                st.session_state.creds.refresh(Request())
+            except:
+                del st.session_state.creds
+                return False
         return True
 
     return False
 
+# ==========================================
+# 2. GMAIL FUNCTIONS (SEND AS USER)
+# ==========================================
 def get_gmail_service():
     if "creds" not in st.session_state: return None
     return build('gmail', 'v1', credentials=st.session_state.creds)
 
 def get_user_signature():
-    """Fetches the user's HTML signature from Gmail settings"""
+    """Fetches the user's real HTML signature from Gmail"""
     try:
         service = get_gmail_service()
-        # Get primary alias
         sendas_list = service.users().settings().sendAs().list(userId='me').execute()
         for alias in sendas_list.get('sendAs', []):
             if alias.get('isPrimary'):
-                return alias.get('signature', '') # This returns HTML
+                return alias.get('signature', '') # Returns HTML
         return ""
-    except Exception as e:
-        st.warning(f"Could not fetch signature: {e}")
+    except:
         return ""
 
 def send_email_as_user(to_email, subject, body_html):
-    """Sends email using the LOGGED IN user's account via API"""
+    """Sends email via Gmail API"""
     try:
         service = get_gmail_service()
-        
         message = MIMEMultipart()
         message['to'] = to_email
         message['subject'] = subject
         
-        # Attach HTML body (required for signature)
         msg = MIMEText(body_html, 'html')
         message.attach(msg)
         
-        # Encode
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         body = {'raw': raw}
         
         service.users().messages().send(userId='me', body=body).execute()
         return True
     except Exception as e:
-        st.error(f"Gmail API Error: {e}")
+        st.error(f"Gmail Error: {e}")
         return False
 
 # ==========================================
-# 3. DATABASE CONNECTION (Service Account)
+# 3. DATABASE FUNCTIONS (SERVICE ACCOUNT)
 # ==========================================
 def get_db_client():
+    """Connects to Google Sheets"""
     if "connections" not in st.secrets:
-        st.error("❌ Missing DB secrets.")
+        st.error("❌ Secrets missing [connections].")
         st.stop()
     
     secrets_dict = dict(st.secrets["connections"]["gsheets"])
@@ -137,6 +150,7 @@ def get_db_client():
     return gspread.authorize(creds)
 
 def get_data(worksheet_name="Clients"):
+    """Robust Data Loader"""
     try:
         client = get_db_client()
         raw_input = st.secrets["connections"]["gsheets"]["spreadsheet"]
@@ -154,6 +168,9 @@ def get_data(worksheet_name="Clients"):
         if not raw_data: return pd.DataFrame()
         
         headers = raw_data[0]
+        rows = raw_data[1:]
+        
+        # Deduplicate Headers
         unique_headers = []
         seen = {}
         for h in headers:
@@ -161,7 +178,7 @@ def get_data(worksheet_name="Clients"):
             if clean_h in seen: seen[clean_h] += 1; unique_headers.append(f"{clean_h}_{seen[clean_h]}")
             else: seen[clean_h] = 0; unique_headers.append(clean_h)
         
-        df = pd.DataFrame(raw_data[1:], columns=unique_headers)
+        df = pd.DataFrame(rows, columns=unique_headers)
         
         if worksheet_name == "Clients":
             for col in ['Status', 'Outcome', 'Internal_Flag', 'Notes', 'Last_Agent', 'Last_Updated']:
@@ -186,30 +203,15 @@ def update_data(df, worksheet_name="Clients"):
         st.error(f"Save Error: {e}")
 
 def clean_text(text):
+    """Converts UPPER CASE to Title Case"""
     if not text: return ""
     return str(text).title().strip()
 
 # ==========================================
-# 4. UI LOGIC
+# 4. VIEW: TEAM MEMBER
 # ==========================================
-if not authenticate_user():
-    # --- LOGIN SCREEN ---
-    c1, c2, c3 = st.columns([1,2,1])
-    with c2:
-        st.image("https://kohani.com/wp-content/uploads/2015/05/logo.png", width=200)
-        st.title("Kohani CRM Login")
-        st.info("Please log in with your @kohani.com Gmail account.")
-        
-        flow = get_auth_flow()
-        auth_url, _ = flow.authorization_url(prompt='consent')
-        
-        st.link_button("🔵 Sign in with Google", auth_url, type="primary")
-else:
-    # --- LOGGED IN APP ---
-    # Determine Role (Admin Check)
-    user_email = st.session_state.user_email
-    role = "Admin" if ("ali" in user_email or "admin" in user_email) else "Staff"
-
+def render_team_view(df, templates, user_email):
+    
     # --- SIDEBAR ---
     with st.sidebar:
         st.write(f"👤 **{user_email}**")
@@ -217,122 +219,245 @@ else:
             del st.session_state.creds
             del st.session_state.user_email
             st.rerun()
-
-    # --- LOAD DATA ---
-    df = get_data("Clients")
-    templates = get_data("Templates")
-
-    # --- ADMIN VIEW ---
-    if role == "Admin":
-        st.title("🔒 Admin Dashboard")
-        st.metric("Total Clients", len(df))
-        st.metric("Calls Done", len(df[df['Status'] != 'New']))
-        st.subheader("Inbox (Yes + Pending Email)")
-        targets = df[(df['Outcome'] == 'Yes') & (df['Status'] != 'Manager Emailed')]
-        st.dataframe(targets)
-    
-    # --- STAFF VIEW ---
-    else:
-        with st.sidebar:
-            st.markdown("---")
-            search = st.text_input("Search Name/Phone")
-            if search:
-                res = df[df['Name'].astype(str).str.contains(search, case=False, na=False)]
-                if not res.empty:
-                    st.write(f"Found {len(res)}")
-                    label = st.selectbox("Select", res['Name'] + " (" + res['Status'] + ")")
-                    if st.button("Load"):
-                        t_id = res[res['Name'] + " (" + res['Status'] + ")" == label]['ID'].values[0]
-                        st.session_state.current_id = t_id
-                        st.rerun()
-
-        if 'current_id' not in st.session_state: st.session_state.current_id = None
+            
+        st.markdown("---")
+        st.subheader("🔍 Search & Edit")
+        search = st.text_input("Find Client")
+        if search:
+            # Search by Name or Phone
+            res = df[
+                df['Name'].astype(str).str.contains(search, case=False, na=False) |
+                df['Home Telephone'].astype(str).str.contains(search, case=False, na=False)
+            ]
+            if not res.empty:
+                st.write(f"Found {len(res)}")
+                # Create Unique Label
+                res['Label'] = res['Name'] + " (" + res['Status'] + ")"
+                target = st.selectbox("Select", res['Label'])
+                # Get ID
+                t_id = res[res['Label'] == target]['ID'].values[0]
+                
+                if st.button("📂 LOAD CLIENT"):
+                    st.session_state.current_id = t_id
+                    st.rerun()
+            else:
+                st.warning("No matches.")
         
-        if st.session_state.current_id is None:
-            queue = df[df['Status'] == 'New']
-            st.title("📞 Call Queue")
-            st.info(f"Remaining: {len(queue)}")
-            if not queue.empty and st.button("START CALL", type="primary"):
+        st.markdown("---")
+        completed = len(df[df['Status'] != 'New'])
+        st.progress(completed / len(df), text=f"{completed}/{len(df)} Done")
+
+    # --- MAIN AREA ---
+    if 'current_id' not in st.session_state: st.session_state.current_id = None
+    
+    if st.session_state.current_id is None:
+        # QUEUE MODE
+        queue = df[df['Status'] == 'New']
+        st.title("📞 Call Queue")
+        st.info(f"Clients Remaining: **{len(queue)}**")
+        if not queue.empty:
+            if st.button("📞 START NEXT CALL", type="primary"):
                 st.session_state.current_id = queue.sample(1).iloc[0]['ID']
                 st.rerun()
         else:
-            # Active Card
-            mask = df['ID'] == st.session_state.current_id
-            if not mask.any(): st.session_state.current_id = None; st.rerun()
-            idx = df.index[mask][0]
-            client = df.loc[idx]
+            st.success("🎉 All new clients called!")
+            
+    else:
+        # ACTIVE CARD MODE
+        mask = df['ID'] == st.session_state.current_id
+        if not mask.any(): st.session_state.current_id = None; st.rerun()
+        idx = df.index[mask][0]
+        client = df.loc[idx]
 
-            with st.container(border=True):
-                st.title(clean_text(client['Name']))
+        with st.container(border=True):
+            # Title
+            c_h1, c_h2 = st.columns([3,1])
+            c_h1.title(clean_text(client['Name']))
+            c_h2.metric("Status", client['Status'])
+            
+            # --- EDIT FORM ---
+            with st.expander("📝 Edit Details", expanded=True):
+                c1, c2 = st.columns(2)
+                # Auto-Clean on load
+                new_tp_first = c1.text_input("TP First Name", clean_text(client.get('Taxpayer First Name')))
+                new_sp_first = c2.text_input("SP First Name", clean_text(client.get('Spouse First Name')))
                 
-                # Edit Form
-                with st.expander("📝 Edit Details", expanded=True):
-                    c1, c2 = st.columns(2)
-                    new_tp_first = c1.text_input("TP First Name", clean_text(client.get('Taxpayer First Name')))
-                    new_sp_first = c2.text_input("SP First Name", clean_text(client.get('Spouse First Name')))
-                    c3, c4 = st.columns(2)
-                    new_phone = c3.text_input("Phone", client.get('Home Telephone'))
-                    new_email = c4.text_input("Email", client.get('Taxpayer E-mail Address'))
+                c3, c4 = st.columns(2)
+                new_tp_last = c3.text_input("TP Last Name", clean_text(client.get('Taxpayer last name')))
+                new_sp_last = c4.text_input("SP Last Name", clean_text(client.get('Spouse last name')))
+                
+                c5, c6 = st.columns(2)
+                new_phone = c5.text_input("Phone", client.get('Home Telephone'))
+                new_email = c6.text_input("Email", client.get('Taxpayer E-mail Address'))
 
-                # Notes
-                st.markdown("### Notes")
-                st.text_area("History", str(client.get('Notes','')), disabled=True, height=100)
-                new_note = st.text_area("Add Note")
+            # --- NOTES ---
+            st.markdown("### Notes")
+            st.text_area("History", str(client.get('Notes', '')), disabled=True, height=100)
+            new_note = st.text_area("Add Note")
 
-                # Outcome
-                c_out1, c_out2 = st.columns(2)
-                res = c_out1.selectbox("Result", ["Left Message", "Talked", "Wrong Number"])
-                dec = c_out2.selectbox("Decision", ["Pending", "Yes", "No"])
-                
-                # Email with Signature
-                send_email = st.checkbox(f"Email {new_email}")
-                final_html = ""
-                subj = ""
-                
-                if send_email:
-                    if not templates.empty:
-                        tmplt = st.selectbox("Template", templates['Type'].unique())
+            # --- OUTCOME ---
+            c_out1, c_out2 = st.columns(2)
+            res = c_out1.selectbox("Result", ["Left Message", "Talked", "Wrong Number"])
+            dec = c_out2.selectbox("Decision", ["Pending", "Yes", "No", "Maybe"])
+            flag = st.checkbox("🚩 Internal Flag")
+
+            # --- EMAIL ---
+            st.markdown("### Email")
+            send_email = st.checkbox(f"Send to {new_email}")
+            final_html = ""
+            subj = ""
+            
+            if send_email:
+                if not templates.empty:
+                    tmplt = st.selectbox("Template", templates['Type'].unique())
+                    if not templates[templates['Type'] == tmplt].empty:
                         raw_body = templates[templates['Type'] == tmplt]['Body'].values[0]
                         subj = templates[templates['Type'] == tmplt]['Subject'].values[0]
                         
-                        # Fetch Signature
+                        # Fetch User Signature
                         sig = get_user_signature()
                         
-                        # Replace logic (convert newlines to <br> for HTML)
+                        # Replace logic
                         disp_name = new_tp_first if new_tp_first else "Client"
-                        body_content = raw_body.replace("{Name}", disp_name).replace("\n", "<br>")
+                        body_text = raw_body.replace("{Name}", disp_name)
                         
-                        # Combine Body + Signature
-                        final_html = f"{body_content}<br><br>{sig}"
+                        # Allow edit of BODY only
+                        body_edit = st.text_area("Edit Message", value=body_text, height=150)
                         
-                        # Preview
-                        st.markdown("---")
-                        st.caption("📧 Email Preview:")
-                        st.html(final_html) # Streamlit command to render HTML
-                    else:
-                        st.warning("No templates.")
+                        # Combine for HTML sending
+                        final_html = f"{body_edit.replace(chr(10), '<br>')}<br><br>{sig}"
+                else:
+                    st.warning("No templates.")
 
-                # Save
-                if st.button("💾 SAVE & FINISH", type="primary"):
-                    # Update DF logic...
-                    df.at[idx, 'Taxpayer First Name'] = new_tp_first
-                    df.at[idx, 'Spouse First Name'] = new_sp_first
-                    df.at[idx, 'Home Telephone'] = new_phone
-                    df.at[idx, 'Taxpayer E-mail Address'] = new_email
-                    df.at[idx, 'Status'] = res
-                    df.at[idx, 'Outcome'] = dec
-                    df.at[idx, 'Last_Agent'] = user_email
-                    df.at[idx, 'Last_Updated'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-                    
-                    if new_note:
-                        df.at[idx, 'Notes'] = str(client.get('Notes','')) + f"\n[{user_email}]: {new_note}"
+            # --- SAVE ---
+            if st.button("💾 SAVE & FINISH", type="primary"):
+                # Update DataFrame
+                df.at[idx, 'Taxpayer First Name'] = new_tp_first
+                df.at[idx, 'Spouse First Name'] = new_sp_first
+                df.at[idx, 'Taxpayer last name'] = new_tp_last
+                df.at[idx, 'Spouse last name'] = new_sp_last
+                df.at[idx, 'Home Telephone'] = new_phone
+                df.at[idx, 'Taxpayer E-mail Address'] = new_email
+                df.at[idx, 'Status'] = res
+                df.at[idx, 'Outcome'] = dec
+                df.at[idx, 'Internal_Flag'] = "TRUE" if flag else "FALSE"
+                df.at[idx, 'Last_Agent'] = user_email
+                df.at[idx, 'Last_Updated'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                
+                if new_note:
+                    df.at[idx, 'Notes'] = str(client.get('Notes', '')) + f"\n[{user_email}]: {new_note}"
 
-                    if send_email and new_email:
-                        if send_email_as_user(new_email, subj, final_html):
-                            st.toast("Email Sent")
+                # Send Email
+                if send_email and new_email:
+                    if send_email_as_user(new_email, subj, final_html):
+                        st.toast(f"Email sent to {new_email}")
 
+                with st.spinner("Saving..."):
                     update_data(df, "Clients")
-                    st.success("Saved!")
-                    time.sleep(1)
-                    st.session_state.current_id = None
-                    st.rerun()
+                
+                if dec == "Yes": st.balloons()
+                st.success("Saved!")
+                time.sleep(1)
+                st.session_state.current_id = None
+                st.rerun()
+
+# ==========================================
+# 5. VIEW: ADMIN
+# ==========================================
+def render_admin_view(df, templates, user_email):
+    st.title("🔒 Admin Dashboard")
+    
+    # 1. METRICS
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Clients", len(df))
+    c2.metric("Calls Made", len(df[df['Status'] != 'New']))
+    c3.metric("Pending/Maybe", len(df[df['Outcome'].isin(['Pending', 'Maybe'])]))
+    c4.metric("Success (Yes)", len(df[df['Outcome'] == 'Yes']))
+
+    st.markdown("---")
+
+    # 2. TABS
+    tab1, tab2 = st.tabs(["📥 Priority Inbox", "📋 All Activity"])
+
+    # TAB 1: INBOX
+    with tab1:
+        st.subheader("Clients Waiting for Manager Email")
+        targets = df[(df['Outcome'] == 'Yes') & (df['Status'] != 'Manager Emailed')]
+        
+        if targets.empty:
+            st.success("Inbox Zero!")
+        else:
+            st.dataframe(targets[['Name', 'Home Telephone', 'Outcome', 'Notes']])
+            
+            st.write("### Send Manager Follow-up")
+            # Selector
+            opts = targets['Name'] + " (" + targets['ID'].astype(str) + ")"
+            sel_label = st.selectbox("Select Client", opts)
+            
+            if sel_label:
+                sel_id = sel_label.split("(")[1].replace(")", "")
+                client = targets[targets['ID'] == sel_id].iloc[0]
+                
+                # Compose
+                if not templates.empty:
+                    # Pick 'Manager Follow-up' or first available
+                    t_type = 'Manager Follow-up' if 'Manager Follow-up' in templates['Type'].values else templates['Type'].iloc[0]
+                    
+                    t_row = templates[templates['Type'] == t_type].iloc[0]
+                    subj = t_row['Subject']
+                    raw_body = t_row['Body']
+                    
+                    # Fill Name
+                    f_name = client.get('Taxpayer First Name') if client.get('Taxpayer First Name') else "Client"
+                    body_text = raw_body.replace("{Name}", str(f_name))
+                    
+                    final_body = st.text_area("Message", value=body_text, height=150)
+                    
+                    if st.button("🚀 Send"):
+                         sig = get_user_signature()
+                         final_html = f"{final_body.replace(chr(10), '<br>')}<br><br>{sig}"
+                         
+                         if send_email_as_user(client['Taxpayer E-mail Address'], subj, final_html):
+                             # Mark as Done
+                             idx = df.index[df['ID'] == client['ID']][0]
+                             df.at[idx, 'Status'] = "Manager Emailed"
+                             update_data(df, "Clients")
+                             st.success("Sent!")
+                             time.sleep(1)
+                             st.rerun()
+
+    # TAB 2: ALL ACTIVITY
+    with tab2:
+        st.subheader("All Call Logs")
+        activity = df[df['Status'] != 'New']
+        st.dataframe(activity[['Name', 'Status', 'Outcome', 'Last_Updated', 'Last_Agent', 'Notes']])
+
+# ==========================================
+# 6. MAIN ROUTER
+# ==========================================
+# 1. Check Auth
+if not authenticate_user():
+    # Login Screen
+    c1, c2, c3 = st.columns([1,2,1])
+    with c2:
+        st.image("https://kohani.com/wp-content/uploads/2015/05/logo.png", width=200)
+        st.title("Kohani CRM Login")
+        st.info("Sign in with your @kohani.com Gmail")
+        
+        flow = get_auth_flow()
+        auth_url, _ = flow.authorization_url(prompt='consent')
+        st.link_button("🔵 Sign in with Google", auth_url, type="primary")
+
+else:
+    # App Loaded
+    user_email = st.session_state.user_email
+    role = "Admin" if ("ali" in user_email or "admin" in user_email) else "Staff"
+    
+    # Load Data Once
+    df = get_data("Clients")
+    templates = get_data("Templates")
+
+    if role == "Admin":
+        render_admin_view(df, templates, user_email)
+    else:
+        render_team_view(df, templates, user_email)
