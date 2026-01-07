@@ -250,6 +250,7 @@ def render_client_card_editor(df, templates, client_id):
     client = df.loc[idx]
     
     with st.container(border=True):
+        # Header with BACK button logic handled by caller, but we add a visual header
         c_h1, c_h2 = st.columns([3,1])
         c_h1.title(clean_text(client['Name']))
         c_h2.metric("Status", client['Status'])
@@ -299,7 +300,14 @@ def render_client_card_editor(df, templates, client_id):
             else:
                 st.warning("No templates.")
 
-        if st.button("💾 SAVE & FINISH", type="primary"):
+        col_b1, col_b2 = st.columns([1,4])
+        
+        if col_b1.button("⬅️ Cancel / Back"):
+            st.session_state.current_id = None
+            st.session_state.admin_current_id = None
+            st.rerun()
+
+        if col_b2.button("💾 SAVE & FINISH", type="primary", use_container_width=True):
             # Update
             df.at[idx, 'Taxpayer First Name'] = new_tp_first
             df.at[idx, 'Spouse First Name'] = new_sp_first
@@ -327,26 +335,78 @@ def render_client_card_editor(df, templates, client_id):
             st.success("Saved!")
             time.sleep(1)
             st.session_state.current_id = None
+            st.session_state.admin_current_id = None
             st.rerun()
 
 # ==========================================
-# 6. VIEW: TEMPLATE MANAGER (ADMIN ONLY)
+# 6. VIEW: TEAM MEMBER (LOBBY vs CARD)
+# ==========================================
+def render_team_view(df, templates, user_email):
+    
+    # --- STATE CHECK ---
+    if 'current_id' not in st.session_state: st.session_state.current_id = None
+    
+    # --- LOBBY VIEW (No Client Selected) ---
+    if st.session_state.current_id is None:
+        st.subheader("👋 Work Lobby")
+        
+        col_queue, col_search = st.columns([1, 1])
+        
+        # COLUMN 1: QUEUE
+        with col_queue:
+            with st.container(border=True):
+                st.write("### 📞 Call Queue")
+                queue = df[df['Status'] == 'New']
+                st.metric("Clients Remaining", len(queue))
+                
+                if not queue.empty:
+                    if st.button("🎲 START RANDOM CALL", type="primary", use_container_width=True):
+                        st.session_state.current_id = queue.sample(1).iloc[0]['ID']
+                        st.rerun()
+                else:
+                    st.success("🎉 Queue Complete!")
+
+        # COLUMN 2: SEARCH
+        with col_search:
+            with st.container(border=True):
+                st.write("### 🔎 Find Client")
+                search = st.text_input("Search Name, Phone, or Email")
+                if search:
+                    res = df[
+                        df['Name'].astype(str).str.contains(search, case=False, na=False) |
+                        df['Home Telephone'].astype(str).str.contains(search, case=False, na=False)
+                    ]
+                    if not res.empty:
+                        st.write(f"Found {len(res)}:")
+                        # Simplified Selection
+                        for i, row in res.iterrows():
+                            # Create a mini row for each result
+                            c1, c2 = st.columns([3, 1])
+                            c1.text(f"{row['Name']} ({row['Status']})")
+                            if c2.button("LOAD", key=f"load_{row['ID']}"):
+                                st.session_state.current_id = row['ID']
+                                st.rerun()
+                    else:
+                        st.warning("No matches.")
+
+    # --- CLIENT CARD VIEW ---
+    else:
+        render_client_card_editor(df, templates, st.session_state.current_id)
+
+# ==========================================
+# 7. VIEW: TEMPLATE MANAGER
 # ==========================================
 def render_template_manager():
     st.subheader("📝 Template Manager")
     
-    # Cheat Sheet
-    with st.expander("HTML Cheat Sheet (How to format emails)"):
+    with st.expander("HTML Cheat Sheet"):
         st.markdown("""
         - **Bold:** `<b>Text</b>` -> <b>Text</b>
-        - **Italic:** `<i>Text</i>` -> <i>Text</i>
-        - **Link:** `<a href="https://kohani.com">Link Name</a>` -> <a href="#">Link Name</a>
-        - **Line Break:** Press Enter (automatically converts) or use `<br>`
+        - **Link:** `<a href="https://kohani.com">Link</a>`
+        - **Break:** `<br>`
         """)
 
     df_temp = get_data("Templates")
-    
-    # Editor
     edited_df = st.data_editor(df_temp, num_rows="dynamic", use_container_width=True)
     
     if st.button("💾 Save Templates"):
@@ -360,14 +420,93 @@ def render_template_manager():
         prev_temp = st.selectbox("Preview Template", edited_df['Type'].unique())
         row = edited_df[edited_df['Type'] == prev_temp].iloc[0]
         st.write(f"**Subject:** {row['Subject']}")
-        
-        # Render HTML
         dummy_body = row['Body'].replace("{Name}", "John Doe").replace("\n", "<br>")
-        st.caption("How it will look to the client:")
         st.html(f"<div style='border:1px solid #ccc; padding:15px; border-radius:5px;'>{dummy_body}</div>")
 
 # ==========================================
-# 7. ROUTER & SIDEBAR
+# 8. VIEW: ADMIN DASHBOARD
+# ==========================================
+def render_admin_view(df, templates, user_email):
+    st.title("🔒 Admin Dashboard")
+    
+    # METRICS
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Clients", len(df))
+    c2.metric("Calls Made", len(df[df['Status'] != 'New']))
+    c3.metric("Pending", len(df[df['Outcome'].isin(['Pending', 'Maybe'])]))
+    c4.metric("Success", len(df[df['Outcome'] == 'Yes']))
+
+    st.markdown("---")
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Activity", "📥 Inbox", "🔍 Database", "📝 Templates"])
+
+    with tab1:
+        st.subheader("All Call Logs")
+        activity = df[df['Status'] != 'New'].sort_values(by='Last_Updated', ascending=False)
+        st.dataframe(activity[['Name', 'Status', 'Outcome', 'Last_Updated', 'Last_Agent']])
+
+    with tab2:
+        st.subheader("Waiting for Manager Email")
+        targets = df[(df['Outcome'] == 'Yes') & (df['Status'] != 'Manager Emailed')]
+        if targets.empty:
+            st.success("Inbox Zero!")
+        else:
+            st.info("👆 Click a row to email.")
+            event = st.dataframe(targets[['Name', 'Home Telephone', 'Notes']], on_select="rerun", selection_mode="single-row", use_container_width=True)
+            
+            if len(event.selection.rows) > 0:
+                row_idx = event.selection.rows[0]
+                client_id = targets.iloc[row_idx]['ID']
+                client = targets[targets['ID'] == client_id].iloc[0]
+                
+                st.markdown("---")
+                st.markdown(f"### 📤 Compose: {client['Name']}")
+                
+                if not templates.empty:
+                    t_options = templates['Type'].unique().tolist()
+                    default_idx = t_options.index('Manager Follow-up') if 'Manager Follow-up' in t_options else 0
+                    selected_template = st.selectbox("Select Template", t_options, index=default_idx)
+                    
+                    t_row = templates[templates['Type'] == selected_template].iloc[0]
+                    f_name = clean_text(client.get('Taxpayer First Name')) or "Client"
+                    body_text = t_row['Body'].replace("{Name}", f_name)
+                    subj = t_row['Subject']
+                    
+                    final_subj = st.text_input("Subject", value=subj)
+                    final_text = st.text_area("Message Body", value=body_text, height=200)
+                    
+                    if st.button("🚀 Send Email", type="primary"):
+                        sig = get_user_signature()
+                        final_html = f"{final_text.replace(chr(10), '<br>')}<br><br>{sig}"
+                        if send_email_as_user(client['Taxpayer E-mail Address'], final_subj, final_text, final_html):
+                            idx = df.index[df['ID'] == client['ID']][0]
+                            df.at[idx, 'Status'] = "Manager Emailed"
+                            update_data(df, "Clients")
+                            st.success("Sent!")
+                            time.sleep(1)
+                            st.rerun()
+
+    with tab3: # Admin Database Access
+        st.subheader("Database Search & Edit")
+        search = st.text_input("Admin Search")
+        if search:
+            res = df[df['Name'].astype(str).str.contains(search, case=False, na=False)]
+            if not res.empty:
+                for i, row in res.iterrows():
+                    c1, c2 = st.columns([3, 1])
+                    c1.text(f"{row['Name']} ({row['Status']})")
+                    if c2.button("EDIT", key=f"admin_load_{row['ID']}"):
+                        st.session_state.admin_current_id = row['ID']
+                        st.rerun()
+        
+        if st.session_state.get('admin_current_id'):
+            st.markdown("---")
+            render_client_card_editor(df, templates, st.session_state.admin_current_id)
+
+    with tab4:
+        render_template_manager()
+
+# ==========================================
+# 9. MAIN ROUTER
 # ==========================================
 if not authenticate_user():
     c1, c2, c3 = st.columns([1,2,1])
@@ -381,98 +520,24 @@ else:
     user_email = st.session_state.user_email
     role = "Admin" if ("ali" in user_email or "admin" in user_email) else "Staff"
     
-    # Sidebar
     with st.sidebar:
         user_name = st.session_state.get('user_name', user_email)
         st.write(f"👤 **{user_name}**")
         st.caption(f"Role: {role}")
-        
         if st.button("🔄 Refresh Data"):
             get_data.clear()
             st.rerun()
-            
         if st.button("Logout"):
             del st.session_state.creds; del st.session_state.user_email; st.rerun()
             
-    # Load Data
     df = get_data("Clients")
     templates = get_data("Templates")
     
-    # Show Gamification Stats to everyone
+    # Global Gamification
     render_gamification(df)
     st.markdown("---")
 
-    # Routing
     if role == "Admin":
-        tabs = st.tabs(["📊 Dashboard", "📥 Inbox", "🔍 Database & Edit", "📝 Templates"])
-        
-        with tabs[0]: # Dashboard
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Clients", len(df))
-            c2.metric("Calls Made", len(df[df['Status'] != 'New']))
-            c3.metric("Pending", len(df[df['Outcome'].isin(['Pending', 'Maybe'])]))
-            c4.metric("Success", len(df[df['Outcome'] == 'Yes']))
-            
-            st.subheader("All Activity Log")
-            activity = df[df['Status'] != 'New'].sort_values(by='Last_Updated', ascending=False)
-            st.dataframe(activity[['Name', 'Status', 'Outcome', 'Last_Updated', 'Last_Agent']])
-
-        with tabs[1]: # Inbox
-            st.subheader("Waiting for Manager Email (Yes)")
-            targets = df[(df['Outcome'] == 'Yes') & (df['Status'] != 'Manager Emailed')]
-            if targets.empty:
-                st.success("Inbox Zero!")
-            else:
-                st.info("Select a row to email.")
-                event = st.dataframe(targets[['Name', 'Home Telephone', 'Notes']], on_select="rerun", selection_mode="single-row", use_container_width=True)
-                if len(event.selection.rows) > 0:
-                    row_idx = event.selection.rows[0]
-                    client_id = targets.iloc[row_idx]['ID']
-                    render_client_card_editor(df, templates, client_id)
-
-        with tabs[2]: # Database (Same as Team View)
-            st.subheader("Full Database Search")
-            search = st.text_input("Search Name/Phone/Email")
-            if search:
-                res = df[df['Name'].astype(str).str.contains(search, case=False, na=False)]
-                if not res.empty:
-                    res['Label'] = res['Name'] + " (" + res['Status'] + ")"
-                    target = st.selectbox("Select Client", res['Label'])
-                    t_id = res[res['Label'] == target]['ID'].values[0]
-                    if st.button("Load Client Card"):
-                        st.session_state.admin_current_id = t_id
-                        st.rerun()
-            
-            if 'admin_current_id' in st.session_state:
-                render_client_card_editor(df, templates, st.session_state.admin_current_id)
-
-        with tabs[3]: # Templates
-            render_template_manager()
-
-    else: # STAFF VIEW
-        t1, t2 = st.tabs(["📞 Call Queue", "🔎 Search"])
-        
-        with t1:
-            if 'current_id' not in st.session_state: st.session_state.current_id = None
-            if st.session_state.current_id is None:
-                queue = df[df['Status'] == 'New']
-                st.info(f"Queue: {len(queue)} clients")
-                if not queue.empty and st.button("📞 START NEXT CALL", type="primary"):
-                    st.session_state.current_id = queue.sample(1).iloc[0]['ID']
-                    st.rerun()
-            else:
-                render_client_card_editor(df, templates, st.session_state.current_id)
-                if st.button("Cancel / Next"):
-                    st.session_state.current_id = None; st.rerun()
-
-        with t2:
-            search = st.text_input("Find Client")
-            if search:
-                res = df[df['Name'].astype(str).str.contains(search, case=False, na=False)]
-                if not res.empty:
-                    res['Label'] = res['Name'] + " (" + res['Status'] + ")"
-                    target = st.selectbox("Select", res['Label'])
-                    t_id = res[res['Label'] == target]['ID'].values[0]
-                    if st.button("Load"):
-                        st.session_state.current_id = t_id
-                        st.rerun()
+        render_admin_view(df, templates, user_email)
+    else:
+        render_team_view(df, templates, user_email)
