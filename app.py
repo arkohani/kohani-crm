@@ -277,8 +277,8 @@ def render_team_view(df, templates, user_email):
             new_note = st.text_area("Add Note")
 
             c_out1, c_out2 = st.columns(2)
-            res = c_out1.selectbox("Result", ["Left Message", "Talked", "Wrong Number"])
-            dec = c_out2.selectbox("Decision", ["Pending", "Yes", "No", "Maybe"])
+            res = c_out1.selectbox("Result", ["Left Message", "Talked", "Emailed", "Wrong Number"])
+            dec = c_out2.selectbox("Decision", ["Pending", "Yes", "Probably", "Maybe", "No"])
             flag = st.checkbox("🚩 Internal Flag")
 
             st.markdown("### Email")
