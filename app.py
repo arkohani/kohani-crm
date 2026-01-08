@@ -30,10 +30,10 @@ st.markdown("""
     textarea { font-family: monospace; }
     /* Highlight for the reference match box */
     .reference-box {
-        background-color: #f0f8ff;
+        background-color: #e3f2fd;
         padding: 15px;
         border-radius: 8px;
-        border: 1px solid #004B87;
+        border-left: 5px solid #004B87;
         margin-bottom: 15px;
     }
     </style>
@@ -311,17 +311,31 @@ def render_client_card_editor(df, df_ref, templates, client_id):
             # Row 3: Contact Info (Phone)
             st.write("**Contact Info**")
             
-            # --- FEATURE 1: REFERENCE LIST CHECK ---
+            # --- FEATURE 1: ROBUST REFERENCE LIST CHECK ---
             current_phone_val = client.get('Home Telephone', '')
             found_ref_phone = None
             
             # If phone is empty/short and reference data exists
             if (not current_phone_val or len(str(current_phone_val)) < 5) and not df_ref.empty:
-                # Basic fuzzy match: Check if Client Name exists in Reference Name column
-                # Identify 'Phone' column in reference sheet (case insensitive)
-                ref_cols = [c.lower() for c in df_ref.columns]
-                phone_col_idx = next((i for i, x in enumerate(ref_cols) if 'phone' in x), -1)
-                name_col_idx = next((i for i, x in enumerate(ref_cols) if 'name' in x), -1)
+                
+                # Dynamic Column Identification (Case Insensitive + Synonyms)
+                ref_cols = [str(c).lower().strip() for c in df_ref.columns]
+                
+                phone_keywords = ['phone', 'mobile', 'cell', 'tel', 'contact', 'number']
+                name_keywords = ['name', 'client', 'customer', 'taxpayer', 'person']
+                
+                # Find indices using synonyms
+                phone_col_idx = -1
+                for i, col_name in enumerate(ref_cols):
+                    if any(k in col_name for k in phone_keywords):
+                        phone_col_idx = i
+                        break
+                        
+                name_col_idx = -1
+                for i, col_name in enumerate(ref_cols):
+                    if any(k in col_name for k in name_keywords):
+                        name_col_idx = i
+                        break
 
                 if phone_col_idx != -1 and name_col_idx != -1:
                     real_phone_col = df_ref.columns[phone_col_idx]
@@ -329,23 +343,25 @@ def render_client_card_editor(df, df_ref, templates, client_id):
                     
                     # Search
                     search_name = clean_text(client['Name'])
-                    match = df_ref[df_ref[real_name_col].astype(str).str.contains(search_name, case=False, na=False)]
-                    
-                    if not match.empty:
-                        found_ref_phone = match.iloc[0][real_phone_col]
-                        found_ref_name = match.iloc[0][real_name_col]
+                    if search_name:
+                        # Normalize reference names for comparison
+                        match = df_ref[df_ref[real_name_col].astype(str).str.contains(search_name, case=False, na=False)]
                         
-                        st.markdown(f"""
-                        <div class="reference-box">
-                            <strong>⚠️ Missing Phone? Found match in Reference List:</strong><br>
-                            Name: {found_ref_name}<br>
-                            Phone: {found_ref_phone}
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        if st.button("⬇️ Use this Number"):
-                            st.session_state['temp_filled_phone'] = found_ref_phone
-                            st.rerun()
+                        if not match.empty:
+                            found_ref_phone = match.iloc[0][real_phone_col]
+                            found_ref_name = match.iloc[0][real_name_col]
+                            
+                            st.markdown(f"""
+                            <div class="reference-box">
+                                <strong>⚠️ Found in Reference List:</strong><br>
+                                Name: {found_ref_name}<br>
+                                Phone: {found_ref_phone}
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            if st.button("⬇️ Use this Number"):
+                                st.session_state['temp_filled_phone'] = found_ref_phone
+                                st.rerun()
 
             # Determine value to show in text input
             default_phone = st.session_state.pop('temp_filled_phone', current_phone_val)
@@ -681,9 +697,30 @@ else:
         user_name = st.session_state.get('user_name', user_email)
         st.write(f"👤 **{user_name}**")
         st.caption(f"Role: {role}")
+        
+        # --- DIAGNOSTICS PANEL ---
         if st.button("🔄 Refresh Data"):
             get_data.clear()
+            st.cache_data.clear()
             st.rerun()
+
+        st.markdown("---")
+        st.write("**Reference Data Status:**")
+        
+        # Check Reference Data Status
+        # We call it here but cache is cleared above if clicked
+        try:
+            df_ref_check = get_data("Reference")
+            if df_ref_check.empty:
+                st.error("❌ Reference Tab not found or empty.")
+                st.info("Ensure tab is named 'Reference' (case sensitive).")
+            else:
+                st.success(f"✅ Loaded {len(df_ref_check)} rows.")
+                with st.expander("Show Columns"):
+                    st.write(list(df_ref_check.columns))
+        except Exception as e:
+            st.error(f"Error loading ref: {e}")
+
         if st.button("Logout"):
             del st.session_state.creds; del st.session_state.user_email; st.rerun()
             
