@@ -28,6 +28,14 @@ st.markdown("""
     }
     .stDataFrame { border: 1px solid #ddd; border-radius: 5px; }
     textarea { font-family: monospace; }
+    /* Highlight for the reference match box */
+    .reference-box {
+        background-color: #f0f8ff;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #004B87;
+        margin-bottom: 15px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -158,6 +166,8 @@ def get_data(worksheet_name="Clients"):
             ws = sh.worksheet(worksheet_name)
         except:
             if worksheet_name == "Templates": return pd.DataFrame(columns=['Type', 'Subject', 'Body'])
+            # Return empty for Reference if not found
+            if worksheet_name == "Reference": return pd.DataFrame()
             return pd.DataFrame()
             
         raw_data = ws.get_all_values()
@@ -175,11 +185,12 @@ def get_data(worksheet_name="Clients"):
         df = pd.DataFrame(rows, columns=unique_headers)
         
         if worksheet_name == "Clients":
-            # Ensure standard columns exist, including new 'Gender' and 'Spouse E-mail Address'
+            # Ensure standard columns exist
             required_cols = ['Status', 'Outcome', 'Internal_Flag', 'Notes', 'Last_Agent', 'Last_Updated', 'Gender', 'Spouse E-mail Address']
             for col in required_cols:
                 if col not in df.columns: df[col] = ""
             df['Status'] = df['Status'].replace("", "New")
+            
         return df
     except Exception as e:
         return pd.DataFrame()
@@ -226,7 +237,6 @@ def render_gamification(df):
         st.metric("📞 My Calls Today", f"{my_calls} / {target}")
         st.progress(progress)
         
-        # FIX: Check session state so we don't fire balloons on every rerun after target is met
         if my_calls >= target:
             if "goal_celebrated" not in st.session_state:
                 st.balloons()
@@ -240,7 +250,6 @@ def render_gamification(df):
         if not daily_df.empty:
             leaders = daily_df['Last_Agent'].value_counts().reset_index()
             leaders.columns = ['Agent', 'Calls']
-            # Simple Badge Logic
             leaders['Rank'] = leaders['Calls'].apply(lambda x: "🔥" if x >= 15 else "⭐")
             st.dataframe(leaders[['Rank', 'Agent', 'Calls']], hide_index=True, use_container_width=True, height=120)
         else:
@@ -255,22 +264,23 @@ def generate_greeting(style, first_name, last_name, gender):
     
     if style == "Casual":
         return f"Hi {first_name},"
-    else: # Formal
-        if not last_name: return f"Dear {first_name}," # Fallback if no last name
+    else: 
+        if not last_name: return f"Dear {first_name},"
         
         prefix = ""
         if gender == "Male": prefix = "Mr."
         elif gender == "Female": prefix = "Ms."
-        else: return f"Dear {first_name} {last_name}," # Unknown gender
+        else: return f"Dear {first_name} {last_name}," 
         
         return f"Dear {prefix} {last_name},"
 
 # ==========================================
 # 6. SHARED COMPONENTS
 # ==========================================
-def render_client_card_editor(df, templates, client_id):
+def render_client_card_editor(df, df_ref, templates, client_id):
     """
     Shared Logic: Used by both Team and Admin to View/Edit/Email a client.
+    Includes Reference Sheet Cross-Check.
     """
     # Isolate Client
     idx = df.index[df['ID'] == client_id][0]
@@ -300,8 +310,48 @@ def render_client_card_editor(df, templates, client_id):
             
             # Row 3: Contact Info (Phone)
             st.write("**Contact Info**")
+            
+            # --- FEATURE 1: REFERENCE LIST CHECK ---
+            current_phone_val = client.get('Home Telephone', '')
+            found_ref_phone = None
+            
+            # If phone is empty/short and reference data exists
+            if (not current_phone_val or len(str(current_phone_val)) < 5) and not df_ref.empty:
+                # Basic fuzzy match: Check if Client Name exists in Reference Name column
+                # Identify 'Phone' column in reference sheet (case insensitive)
+                ref_cols = [c.lower() for c in df_ref.columns]
+                phone_col_idx = next((i for i, x in enumerate(ref_cols) if 'phone' in x), -1)
+                name_col_idx = next((i for i, x in enumerate(ref_cols) if 'name' in x), -1)
+
+                if phone_col_idx != -1 and name_col_idx != -1:
+                    real_phone_col = df_ref.columns[phone_col_idx]
+                    real_name_col = df_ref.columns[name_col_idx]
+                    
+                    # Search
+                    search_name = clean_text(client['Name'])
+                    match = df_ref[df_ref[real_name_col].astype(str).str.contains(search_name, case=False, na=False)]
+                    
+                    if not match.empty:
+                        found_ref_phone = match.iloc[0][real_phone_col]
+                        found_ref_name = match.iloc[0][real_name_col]
+                        
+                        st.markdown(f"""
+                        <div class="reference-box">
+                            <strong>⚠️ Missing Phone? Found match in Reference List:</strong><br>
+                            Name: {found_ref_name}<br>
+                            Phone: {found_ref_phone}
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        if st.button("⬇️ Use this Number"):
+                            st.session_state['temp_filled_phone'] = found_ref_phone
+                            st.rerun()
+
+            # Determine value to show in text input
+            default_phone = st.session_state.pop('temp_filled_phone', current_phone_val)
+            
             c6, c7 = st.columns(2)
-            new_phone = c6.text_input("Phone", client.get('Home Telephone'))
+            new_phone = c6.text_input("Phone", default_phone)
             
             # Row 4: Emails (TP and SP)
             c8, c9 = st.columns(2)
@@ -319,10 +369,9 @@ def render_client_card_editor(df, templates, client_id):
         dec = c_out2.selectbox("Decision", ["Pending", "Yes", "No", "Maybe"], index=["Pending", "Yes", "No", "Maybe"].index(client['Outcome']) if client['Outcome'] in ["Pending", "Yes", "No", "Maybe"] else 0)
         flag = st.checkbox("🚩 Internal Flag", value=(str(client.get('Internal_Flag')) == 'TRUE'))
 
-        # --- EMAIL SECTION (IMPROVED UX) ---
+        # --- EMAIL SECTION ---
         st.markdown("### ✉️ Email Composition")
         
-        # Email Target Selection
         email_targets = {}
         if new_tp_email: email_targets[f"Taxpayer: {new_tp_email}"] = new_tp_email
         if new_sp_email: email_targets[f"Spouse: {new_sp_email}"] = new_sp_email
@@ -337,11 +386,9 @@ def render_client_card_editor(df, templates, client_id):
             if not email_targets:
                 st.error("No email addresses found for this client.")
             else:
-                # Select Recipient if multiple exist
                 if len(email_targets) > 1:
                     target_label = st.radio("Recipient:", list(email_targets.keys()))
                     selected_email_address = email_targets[target_label]
-                    # Adjust greeting name based on selection
                     is_spouse_email = (selected_email_address == new_sp_email)
                 else:
                     target_label = list(email_targets.keys())[0]
@@ -349,7 +396,6 @@ def render_client_card_editor(df, templates, client_id):
                     selected_email_address = list(email_targets.values())[0]
                     is_spouse_email = (selected_email_address == new_sp_email)
 
-                # Settings
                 ec1, ec2 = st.columns([1, 1])
                 tmplt = ec1.selectbox("Template", templates['Type'].unique())
                 greeting_style = ec2.radio("Greeting Style", ["Casual", "Formal"], horizontal=True)
@@ -358,17 +404,15 @@ def render_client_card_editor(df, templates, client_id):
                     raw_body = templates[templates['Type'] == tmplt]['Body'].values[0]
                     subj = templates[templates['Type'] == tmplt]['Subject'].values[0]
                     
-                    # Calculate Greeting Name (TP or SP)
                     if is_spouse_email and new_sp_first:
                         g_first, g_last = new_sp_first, new_sp_last
-                        g_gender = "Unknown" # Spouse gender usually not tracked specifically in this sheet, defaulting to neutral or could infer
+                        g_gender = "Unknown" 
                     else:
                         g_first, g_last, g_gender = new_tp_first, new_tp_last, new_gender
 
                     greeting_line = generate_greeting(greeting_style, g_first, g_last, g_gender)
                     full_body_draft = f"{greeting_line}\n\n{raw_body}"
                     
-                    # Richer Editing Experience
                     tab_edit, tab_preview = st.tabs(["✏️ Write", "👁️ Preview"])
                     with tab_edit:
                         body_edit = st.text_area("Edit Message Body (HTML supported)", value=full_body_draft, height=300)
@@ -424,7 +468,7 @@ def render_client_card_editor(df, templates, client_id):
 # ==========================================
 # 7. VIEW: TEAM MEMBER (LOBBY vs CARD)
 # ==========================================
-def render_team_view(df, templates, user_email):
+def render_team_view(df, df_ref, templates, user_email):
     if 'current_id' not in st.session_state: st.session_state.current_id = None
     
     if st.session_state.current_id is None:
@@ -462,10 +506,10 @@ def render_team_view(df, templates, user_email):
                     else:
                         st.warning("No matches.")
     else:
-        render_client_card_editor(df, templates, st.session_state.current_id)
+        render_client_card_editor(df, df_ref, templates, st.session_state.current_id)
 
 # ==========================================
-# 8. VIEW: TEMPLATE MANAGER (IMPROVED UX)
+# 8. VIEW: TEMPLATE MANAGER
 # ==========================================
 def render_template_manager():
     st.subheader("📝 Template Manager")
@@ -514,7 +558,7 @@ def render_template_manager():
 # ==========================================
 # 9. VIEW: ADMIN DASHBOARD
 # ==========================================
-def render_admin_view(df, templates, user_email):
+def render_admin_view(df, df_ref, templates, user_email):
     st.title("🔒 Admin Dashboard")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Clients", len(df))
@@ -523,7 +567,7 @@ def render_admin_view(df, templates, user_email):
     c4.metric("Success", len(df[df['Outcome'] == 'Yes']))
     st.markdown("---")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Activity", "📥 Inbox", "🔍 Database", "📝 Templates"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Activity", "📥 Inbox", "🔍 Database (Fix)", "📝 Templates"])
     
     with tab1:
         st.subheader("All Call Logs")
@@ -572,8 +616,6 @@ def render_admin_view(df, templates, user_email):
                         st.components.v1.html(final_html, height=300, scrolling=True)
 
                     if st.button("🚀 Send Email", type="primary"):
-                        # Admin usually sends to Taxpayer, but we could add choice here if needed. 
-                        # Defaulting to Taxpayer Email for Admin "Manager Followup"
                         recipient = client['Taxpayer E-mail Address']
                         if send_email_as_user(recipient, final_subj, final_text, final_html):
                             idx = df.index[df['ID'] == client['ID']][0]
@@ -586,19 +628,37 @@ def render_admin_view(df, templates, user_email):
 
     with tab3: 
         st.subheader("Database Search & Edit")
-        search = st.text_input("Admin Search")
-        if search:
-            res = df[df['Name'].astype(str).str.contains(search, case=False, na=False)]
-            if not res.empty:
-                for i, row in res.iterrows():
-                    c1, c2 = st.columns([3, 1])
-                    c1.text(f"{row['Name']} ({row['Status']})")
-                    if c2.button("EDIT", key=f"admin_load_{row['ID']}"):
-                        st.session_state.admin_current_id = row['ID']
-                        st.rerun()
-        if st.session_state.get('admin_current_id'):
-            st.markdown("---")
-            render_client_card_editor(df, templates, st.session_state.admin_current_id)
+        # --- FEATURE 2: SPLIT VIEW TO PREVENT JUMPING ---
+        col_search, col_admin_edit = st.columns([1, 2])
+        
+        with col_search:
+            st.write("### 🔎 List")
+            # Persist search query
+            search_query = st.text_input("Search", key="admin_search_query")
+            
+            if search_query:
+                res = df[df['Name'].astype(str).str.contains(search_query, case=False, na=False)]
+                if not res.empty:
+                    st.caption(f"Found {len(res)} results:")
+                    for i, row in res.iterrows():
+                        # Use a small container per result
+                        with st.container(border=True):
+                            st.markdown(f"**{row['Name']}**")
+                            st.caption(f"Status: {row['Status']}")
+                            if st.button("EDIT", key=f"admin_load_{row['ID']}", use_container_width=True):
+                                st.session_state.admin_current_id = row['ID']
+                                # No rerun needed here specifically if we just want to update the right column
+                else:
+                    st.warning("No matches.")
+            else:
+                st.info("Start typing to search.")
+
+        with col_admin_edit:
+            st.write("### 📝 Editor")
+            if st.session_state.get('admin_current_id'):
+                render_client_card_editor(df, df_ref, templates, st.session_state.admin_current_id)
+            else:
+                st.caption("Select a client from the list on the left to edit.")
 
     with tab4:
         render_template_manager()
@@ -628,10 +688,13 @@ else:
             del st.session_state.creds; del st.session_state.user_email; st.rerun()
             
     df = get_data("Clients")
+    # Load Reference Data
+    df_ref = get_data("Reference")
     templates = get_data("Templates")
+    
     render_gamification(df)
     st.markdown("---")
     if role == "Admin":
-        render_admin_view(df, templates, user_email)
+        render_admin_view(df, df_ref, templates, user_email)
     else:
-        render_team_view(df, templates, user_email)
+        render_team_view(df, df_ref, templates, user_email)
