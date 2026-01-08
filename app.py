@@ -11,7 +11,7 @@ from email.mime.multipart import MIMEMultipart
 import datetime
 import time
 import socket
-import plotly.express as px
+import re
 
 # ==========================================
 # 0. CONFIG & NETWORK SAFETY
@@ -280,7 +280,7 @@ def generate_greeting(style, first_name, last_name, gender):
 def render_client_card_editor(df, df_ref, templates, client_id):
     """
     Shared Logic: Used by both Team and Admin to View/Edit/Email a client.
-    Includes Reference Sheet Cross-Check.
+    Includes Smart Reference Sheet Cross-Check (Token Based).
     """
     # Isolate Client
     idx = df.index[df['ID'] == client_id][0]
@@ -311,56 +311,59 @@ def render_client_card_editor(df, df_ref, templates, client_id):
             # Row 3: Contact Info (Phone)
             st.write("**Contact Info**")
             
-            # --- FEATURE 1: ROBUST REFERENCE LIST CHECK ---
+            # --- FEATURE 1: ROBUST FUZZY / TOKEN MATCHING ---
             current_phone_val = client.get('Home Telephone', '')
             found_ref_phone = None
             
-            # If phone is empty/short and reference data exists
+            # Only search if current phone is missing or short
             if (not current_phone_val or len(str(current_phone_val)) < 5) and not df_ref.empty:
                 
-                # Dynamic Column Identification (Case Insensitive + Synonyms)
+                # Dynamic Column Identification
                 ref_cols = [str(c).lower().strip() for c in df_ref.columns]
                 
                 phone_keywords = ['phone', 'mobile', 'cell', 'tel', 'contact', 'number']
                 name_keywords = ['name', 'client', 'customer', 'taxpayer', 'person']
                 
-                # Find indices using synonyms
                 phone_col_idx = -1
                 for i, col_name in enumerate(ref_cols):
                     if any(k in col_name for k in phone_keywords):
-                        phone_col_idx = i
-                        break
+                        phone_col_idx = i; break
                         
                 name_col_idx = -1
                 for i, col_name in enumerate(ref_cols):
                     if any(k in col_name for k in name_keywords):
-                        name_col_idx = i
-                        break
+                        name_col_idx = i; break
 
                 if phone_col_idx != -1 and name_col_idx != -1:
                     real_phone_col = df_ref.columns[phone_col_idx]
                     real_name_col = df_ref.columns[name_col_idx]
                     
-                    # Search
-                    search_name = clean_text(client['Name'])
-                    if search_name:
-                        # Normalize reference names for comparison
-                        match = df_ref[df_ref[real_name_col].astype(str).str.contains(search_name, case=False, na=False)]
+                    search_name = str(client['Name']).lower().strip()
+                    # Create a set of words from the search name (e.g. "Mahdi Abadi" -> {"mahdi", "abadi"})
+                    search_tokens = set(re.findall(r'\w+', search_name))
+
+                    if search_tokens:
+                        # Define Token Matcher: True if ALL search tokens exist in the reference name
+                        def check_token_match(ref_val):
+                            if not isinstance(ref_val, str): return False
+                            ref_tokens = set(re.findall(r'\w+', ref_val.lower()))
+                            # Allow match if search tokens are a subset (handles First Last vs Last First)
+                            return search_tokens.issubset(ref_tokens)
+
+                        # Find Matches
+                        matches = df_ref[df_ref[real_name_col].apply(check_token_match)]
                         
-                        if not match.empty:
-                            found_ref_phone = match.iloc[0][real_phone_col]
-                            found_ref_name = match.iloc[0][real_name_col]
+                        if not matches.empty:
+                            st.markdown(f'<div class="reference-box"><strong>⚠️ Found {len(matches)} potential match(es) in Reference List:</strong></div>', unsafe_allow_html=True)
                             
-                            st.markdown(f"""
-                            <div class="reference-box">
-                                <strong>⚠️ Found in Reference List:</strong><br>
-                                Name: {found_ref_name}<br>
-                                Phone: {found_ref_phone}
-                            </div>
-                            """, unsafe_allow_html=True)
+                            # If multiple matches (like AFROZ REFAEI appearing twice), let user pick
+                            options = matches.apply(lambda x: f"{x[real_name_col]} | {x[real_phone_col]}", axis=1).tolist()
+                            selected_option = st.selectbox("Select number to use:", options)
                             
-                            if st.button("⬇️ Use this Number"):
-                                st.session_state['temp_filled_phone'] = found_ref_phone
+                            # Extract phone from selection
+                            if st.button("⬇️ Use Selected Number"):
+                                extracted_phone = selected_option.split("|")[-1].strip()
+                                st.session_state['temp_filled_phone'] = extracted_phone
                                 st.rerun()
 
             # Determine value to show in text input
@@ -698,7 +701,6 @@ else:
         st.write(f"👤 **{user_name}**")
         st.caption(f"Role: {role}")
         
-        # --- DIAGNOSTICS PANEL ---
         if st.button("🔄 Refresh Data"):
             get_data.clear()
             st.cache_data.clear()
@@ -707,8 +709,6 @@ else:
         st.markdown("---")
         st.write("**Reference Data Status:**")
         
-        # Check Reference Data Status
-        # We call it here but cache is cleared above if clicked
         try:
             df_ref_check = get_data("Reference")
             if df_ref_check.empty:
@@ -716,8 +716,6 @@ else:
                 st.info("Ensure tab is named 'Reference' (case sensitive).")
             else:
                 st.success(f"✅ Loaded {len(df_ref_check)} rows.")
-                with st.expander("Show Columns"):
-                    st.write(list(df_ref_check.columns))
         except Exception as e:
             st.error(f"Error loading ref: {e}")
 
