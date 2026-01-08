@@ -218,7 +218,7 @@ def render_gamification(df):
     total_daily = len(daily_df)
     
     # 1. My Daily Progress
-    target = 20 # Daily Goal
+    target = 50 # Daily Goal
     progress = min(my_calls / target, 1.0)
     
     c1, c2, c3 = st.columns([1, 1, 2])
