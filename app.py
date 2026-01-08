@@ -280,7 +280,7 @@ def generate_greeting(style, first_name, last_name, gender):
 def render_client_card_editor(df, df_ref, templates, client_id):
     """
     Shared Logic: Used by both Team and Admin to View/Edit/Email a client.
-    Includes Smart Reference Sheet Cross-Check (Token Based).
+    Includes Smart Reference Sheet Cross-Check (Bidirectional Overlap).
     """
     # Isolate Client
     idx = df.index[df['ID'] == client_id][0]
@@ -338,17 +338,31 @@ def render_client_card_editor(df, df_ref, templates, client_id):
                     real_phone_col = df_ref.columns[phone_col_idx]
                     real_name_col = df_ref.columns[name_col_idx]
                     
-                    search_name = str(client['Name']).lower().strip()
-                    # Create a set of words from the search name (e.g. "Mahdi Abadi" -> {"mahdi", "abadi"})
-                    search_tokens = set(re.findall(r'\w+', search_name))
+                    # 1. Clean and Tokenize Client Name (Remove punctuation like ",")
+                    client_name_str = str(client['Name']).lower()
+                    client_tokens = set(re.findall(r'\w+', client_name_str))
 
-                    if search_tokens:
-                        # Define Token Matcher: True if ALL search tokens exist in the reference name
+                    if client_tokens:
+                        # Define Token Matcher with Overlap Logic
                         def check_token_match(ref_val):
                             if not isinstance(ref_val, str): return False
                             ref_tokens = set(re.findall(r'\w+', ref_val.lower()))
-                            # Allow match if search tokens are a subset (handles First Last vs Last First)
-                            return search_tokens.issubset(ref_tokens)
+                            
+                            if not ref_tokens: return False
+                            
+                            # INTERSECTION: How many words are in common?
+                            common = client_tokens.intersection(ref_tokens)
+                            
+                            # RULE A: Strong Match (2 or more words match)
+                            # e.g. "Monica" + "Foroutan" matches -> True
+                            if len(common) >= 2: return True
+                            
+                            # RULE B: Subset Match (Ref fits inside Client OR Client fits inside Ref)
+                            # Handles "Monica V. Foroutan" vs "Monica Foroutan"
+                            if ref_tokens.issubset(client_tokens): return True
+                            if client_tokens.issubset(ref_tokens): return True
+                            
+                            return False
 
                         # Find Matches
                         matches = df_ref[df_ref[real_name_col].apply(check_token_match)]
@@ -356,7 +370,7 @@ def render_client_card_editor(df, df_ref, templates, client_id):
                         if not matches.empty:
                             st.markdown(f'<div class="reference-box"><strong>⚠️ Found {len(matches)} potential match(es) in Reference List:</strong></div>', unsafe_allow_html=True)
                             
-                            # If multiple matches (like AFROZ REFAEI appearing twice), let user pick
+                            # If multiple matches, let user pick
                             options = matches.apply(lambda x: f"{x[real_name_col]} | {x[real_phone_col]}", axis=1).tolist()
                             selected_option = st.selectbox("Select number to use:", options)
                             
