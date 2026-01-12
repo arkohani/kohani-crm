@@ -608,13 +608,11 @@ def render_admin_view(df, df_ref, templates, user_email):
     st.markdown("---")
     
     # --- PERSISTENT NAVIGATION ---
-    if "admin_nav" not in st.session_state:
-        st.session_state.admin_nav = "📥 Inbox"
+    if "admin_nav" not in st.session_state: st.session_state.admin_nav = "📥 Inbox"
     
     nav_options = ["📊 Activity", "📥 Inbox", "🔍 Database (Fix)", "📝 Templates"]
     
-    if st.session_state.admin_nav not in nav_options:
-        st.session_state.admin_nav = "📥 Inbox"
+    if st.session_state.admin_nav not in nav_options: st.session_state.admin_nav = "📥 Inbox"
         
     selected_view = st.radio(
         "Admin Navigation", 
@@ -625,7 +623,6 @@ def render_admin_view(df, df_ref, templates, user_email):
         key="admin_nav_radio",
         on_change=lambda: st.session_state.update(admin_nav=st.session_state.admin_nav_radio)
     )
-    
     st.session_state.admin_nav = selected_view
     st.markdown("---")
 
@@ -670,52 +667,59 @@ def render_admin_view(df, df_ref, templates, user_email):
                     with st.container(border=True):
                         st.markdown(f"### 📤 Compose: {client['Name']}")
                         
-                        # --- 1. RECIPIENT SELECTION ---
-                        tp_email = client.get('Taxpayer E-mail Address', '').strip()
-                        sp_email = client.get('Spouse E-mail Address', '').strip()
+                        # --- 1. RECIPIENT SELECTION (By Name existence, not Email) ---
+                        tp_name = clean_text(client.get('Taxpayer First Name'))
+                        tp_last = clean_text(client.get('Taxpayer last name'))
+                        tp_email = str(client.get('Taxpayer E-mail Address', '')).strip()
                         
-                        email_targets = {}
-                        if tp_email: email_targets[f"Taxpayer: {tp_email}"] = "TP"
-                        if sp_email: email_targets[f"Spouse: {sp_email}"] = "SP"
-                        
-                        target_code = "TP" # Default
-                        selected_email_addr = tp_email
-                        
-                        if not email_targets:
-                            st.error("❌ No email addresses found for this client.")
-                        else:
-                            # If multiple emails, show radio to switch context
-                            if len(email_targets) > 1:
-                                target_label = st.radio("Recipient:", list(email_targets.keys()), key=f"recip_rad_{client_id}")
-                                target_code = email_targets[target_label]
-                                selected_email_addr = tp_email if target_code == "TP" else sp_email
-                            else:
-                                target_label = list(email_targets.keys())[0]
-                                st.caption(f"Sending to {target_label}")
-                                target_code = email_targets[target_label]
-                                selected_email_addr = tp_email if target_code == "TP" else sp_email
+                        sp_name = clean_text(client.get('Spouse First Name'))
+                        sp_last = clean_text(client.get('Spouse last name'))
+                        sp_email = str(client.get('Spouse E-mail Address', '')).strip()
 
-                        # --- 2. SET NAMES & GENDER BASED ON RECIPIENT ---
-                        if target_code == "TP":
-                            f_name = clean_text(client.get('Taxpayer First Name'))
-                            l_name = clean_text(client.get('Taxpayer last name'))
-                            db_gender = client.get('Gender', 'Unknown')
+                        # Build Radio Options
+                        # Format: "Taxpayer (Name)"
+                        # If Spouse exists, add "Spouse (Name)"
+                        
+                        target_map = {"TP": f"Taxpayer: {tp_name}", "SP": f"Spouse: {sp_name}"}
+                        options = [target_map["TP"]]
+                        if sp_name: 
+                            options.append(target_map["SP"])
+                        
+                        # Show Radio Button
+                        selected_label = st.radio("Recipient:", options, horizontal=True, key=f"recip_rad_{client_id}")
+                        
+                        # Determine current context
+                        is_spouse = (selected_label == target_map.get("SP"))
+                        
+                        if is_spouse:
+                            target_code = "SP"
+                            f_name, l_name = sp_name, sp_last
+                            selected_email_addr = sp_email
+                            db_gender = "Unknown" # Default for spouse
                         else:
-                            f_name = clean_text(client.get('Spouse First Name'))
-                            l_name = clean_text(client.get('Spouse last name'))
-                            db_gender = "Unknown" # Default spouse to unknown so you can pick
+                            target_code = "TP"
+                            f_name, l_name = tp_name, tp_last
+                            selected_email_addr = tp_email
+                            db_gender = client.get('Gender', 'Unknown')
+                            
+                        # Show Email Status
+                        if selected_email_addr:
+                            st.caption(f"📧 Emailing: **{selected_email_addr}**")
+                        else:
+                            st.error(f"❌ No email found for {selected_label}. Please check Database.")
 
                         if db_gender not in ["Male", "Female", "Unknown"]: db_gender = "Unknown"
 
-                        # --- 3. SETTINGS ROW ---
+                        # --- 2. SETTINGS ROW ---
                         c_g1, c_g2 = st.columns(2)
                         
                         # Gender Override
                         conf_gender = c_g1.selectbox(
-                            "Gender (Check for Formal Greeting)", 
+                            "Gender", 
                             ["Male", "Female", "Unknown"], 
                             index=["Male", "Female", "Unknown"].index(db_gender),
-                            key=f"gender_select_{client_id}"
+                            key=f"gender_select_{client_id}",
+                            help="Required for 'Mr.' or 'Ms.' greetings."
                         )
                         
                         # Greeting Style
@@ -726,8 +730,12 @@ def render_admin_view(df, df_ref, templates, user_email):
                             horizontal=True,
                             key=f"greet_radio_{client_id}"
                         )
+                        
+                        # Warning if Formal + Unknown
+                        if greeting_style == "Formal" and conf_gender == "Unknown":
+                            st.caption("⚠️ **Note:** Select Male or Female to use 'Mr.' or 'Ms.'. Currently defaulting to full name.")
 
-                        # --- 4. TEMPLATE SELECTION ---
+                        # --- 3. TEMPLATE SELECTION ---
                         if not templates.empty:
                             t_options = templates['Type'].unique().tolist()
                             target_template_name = "Ali - Follow Up"
@@ -739,12 +747,27 @@ def render_admin_view(df, df_ref, templates, user_email):
                             selected_template = st.selectbox("Select Template", t_options, index=default_t_idx, key=f"temp_select_{client_id}")
                             
                             t_row = templates[templates['Type'] == selected_template].iloc[0]
-                            greeting_line = generate_greeting(greeting_style, f_name, l_name, conf_gender)
+                            
+                            # --- 4. GREETING LOGIC (Explicit) ---
+                            # This overrides the global function to ensure it updates exactly how you want here
+                            greeting_line = ""
+                            if greeting_style == "Casual":
+                                greeting_line = f"Hi {f_name},"
+                            else:
+                                # Formal Logic
+                                if conf_gender == "Male":
+                                    greeting_line = f"Dear Mr. {l_name},"
+                                elif conf_gender == "Female":
+                                    greeting_line = f"Dear Ms. {l_name},"
+                                else:
+                                    # Fallback if Unknown
+                                    greeting_line = f"Dear {f_name} {l_name},"
+
                             full_body = f"{greeting_line}\n\n{t_row['Body']}"
                             subj = t_row['Subject']
                             
                             # --- 5. EDITOR ---
-                            # IMPORTANT: We add dependencies to the key so the text area REFRESHES when gender/template changes
+                            # Dependency key ensures text refreshes if Gender/Target changes
                             deps_key = f"{conf_gender}_{greeting_style}_{selected_template}_{target_code}"
                             
                             final_subj = st.text_input("Subject", value=subj, key=f"subj_{client_id}_{selected_template}")
@@ -757,7 +780,7 @@ def render_admin_view(df, df_ref, templates, user_email):
                             # --- 7. PREVIEW & SEND ---
                             with st.expander("👁️ Preview Email (Visual)", expanded=True):
                                 sig = get_user_signature()
-                                # Add white background style for readability
+                                # White background for readability
                                 final_html_preview = f"""
                                 <div style="background-color: white; color: black; padding: 20px; border-radius: 5px; border: 1px solid #ccc;">
                                     <div style="font-family: sans-serif;">
@@ -769,25 +792,22 @@ def render_admin_view(df, df_ref, templates, user_email):
                                 """
                                 st.components.v1.html(final_html_preview, height=250, scrolling=True)
                                 
-                                # Actual HTML to send
                                 final_html_send = f"{final_text.replace(chr(10), '<br>')}<br><br>{sig}"
 
                             col_send, col_skip = st.columns([2,1])
                             
                             if col_send.button("🚀 SEND & ARCHIVE", type="primary", use_container_width=True, key=f"btn_send_{client_id}"):
                                 if not selected_email_addr:
-                                    st.error("No email address selected!")
+                                    st.error(f"Cannot send: No email address for {selected_label}!")
                                 else:
                                     if send_email_as_user(selected_email_addr, final_subj, final_text, final_html_send):
                                         idx = df.index[df['ID'] == client['ID']][0]
                                         
-                                        # Update DB
                                         df.at[idx, 'Status'] = "Manager Emailed"
-                                        # Only update gender if we are emailing the main taxpayer
+                                        # Only update gender if TP
                                         if target_code == "TP":
                                             df.at[idx, 'Gender'] = conf_gender
                                         
-                                        # Save Note if exists
                                         if new_note:
                                             existing_notes = str(df.at[idx, 'Notes'])
                                             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
