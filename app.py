@@ -684,15 +684,14 @@ def render_admin_view(df, df_ref, templates, user_email):
                         if not email_targets:
                             st.error("❌ No email addresses found for this client.")
                         else:
-                            # If multiple emails, show radio
+                            # If multiple emails, show radio to switch context
                             if len(email_targets) > 1:
                                 target_label = st.radio("Recipient:", list(email_targets.keys()), key=f"recip_rad_{client_id}")
                                 target_code = email_targets[target_label]
                                 selected_email_addr = tp_email if target_code == "TP" else sp_email
                             else:
-                                # Single email found
                                 target_label = list(email_targets.keys())[0]
-                                st.success(f"Sending to {target_label}")
+                                st.caption(f"Sending to {target_label}")
                                 target_code = email_targets[target_label]
                                 selected_email_addr = tp_email if target_code == "TP" else sp_email
 
@@ -700,13 +699,11 @@ def render_admin_view(df, df_ref, templates, user_email):
                         if target_code == "TP":
                             f_name = clean_text(client.get('Taxpayer First Name'))
                             l_name = clean_text(client.get('Taxpayer last name'))
-                            # Default gender from DB for Taxpayer
                             db_gender = client.get('Gender', 'Unknown')
                         else:
                             f_name = clean_text(client.get('Spouse First Name'))
                             l_name = clean_text(client.get('Spouse last name'))
-                            # Spouse gender usually isn't stored separately, assume Unknown or let user pick
-                            db_gender = "Unknown"
+                            db_gender = "Unknown" # Default spouse to unknown so you can pick
 
                         if db_gender not in ["Male", "Female", "Unknown"]: db_gender = "Unknown"
 
@@ -747,8 +744,11 @@ def render_admin_view(df, df_ref, templates, user_email):
                             subj = t_row['Subject']
                             
                             # --- 5. EDITOR ---
-                            final_subj = st.text_input("Subject", value=subj, key=f"subj_{client_id}")
-                            final_text = st.text_area("Message Body", value=full_body, height=300, key=f"body_{client_id}")
+                            # IMPORTANT: We add dependencies to the key so the text area REFRESHES when gender/template changes
+                            deps_key = f"{conf_gender}_{greeting_style}_{selected_template}_{target_code}"
+                            
+                            final_subj = st.text_input("Subject", value=subj, key=f"subj_{client_id}_{selected_template}")
+                            final_text = st.text_area("Message Body", value=full_body, height=300, key=f"body_{client_id}_{deps_key}")
                             
                             # --- 6. ADD NOTE ---
                             st.write("**Internal Note**")
@@ -757,17 +757,19 @@ def render_admin_view(df, df_ref, templates, user_email):
                             # --- 7. PREVIEW & SEND ---
                             with st.expander("👁️ Preview Email (Visual)", expanded=True):
                                 sig = get_user_signature()
-                                # Add white background style for readability in dark mode
+                                # Add white background style for readability
                                 final_html_preview = f"""
-                                <div style="background-color: white; color: black; padding: 15px; border-radius: 5px;">
-                                    {final_text.replace(chr(10), '<br>')}
-                                    <br><br>
-                                    {sig}
+                                <div style="background-color: white; color: black; padding: 20px; border-radius: 5px; border: 1px solid #ccc;">
+                                    <div style="font-family: sans-serif;">
+                                        {final_text.replace(chr(10), '<br>')}
+                                        <br><br>
+                                        {sig}
+                                    </div>
                                 </div>
                                 """
                                 st.components.v1.html(final_html_preview, height=250, scrolling=True)
                                 
-                                # Actual HTML to send (without the preview container div)
+                                # Actual HTML to send
                                 final_html_send = f"{final_text.replace(chr(10), '<br>')}<br><br>{sig}"
 
                             col_send, col_skip = st.columns([2,1])
@@ -781,7 +783,7 @@ def render_admin_view(df, df_ref, templates, user_email):
                                         
                                         # Update DB
                                         df.at[idx, 'Status'] = "Manager Emailed"
-                                        # Only update gender if it was the Taxpayer, otherwise we might overwrite TP gender with Spouse gender
+                                        # Only update gender if we are emailing the main taxpayer
                                         if target_code == "TP":
                                             df.at[idx, 'Gender'] = conf_gender
                                         
