@@ -609,9 +609,7 @@ def render_admin_view(df, df_ref, templates, user_email):
     
     # --- PERSISTENT NAVIGATION ---
     if "admin_nav" not in st.session_state: st.session_state.admin_nav = "📥 Inbox"
-    
     nav_options = ["📊 Activity", "📥 Inbox", "🔍 Database (Fix)", "📝 Templates"]
-    
     if st.session_state.admin_nav not in nav_options: st.session_state.admin_nav = "📥 Inbox"
         
     selected_view = st.radio(
@@ -638,104 +636,115 @@ def render_admin_view(df, df_ref, templates, user_email):
     # VIEW 2: INBOX (Manager Emails)
     # ==========================
     elif selected_view == "📥 Inbox":
-        st.subheader("Waiting for Manager Email")
         
+        # 1. Get Targets (Filter out ones already done or skipped in this session)
+        if "skipped_ids" not in st.session_state: st.session_state.skipped_ids = []
+        
+        # Base filter
         targets = df[(df['Outcome'] == 'Yes') & (df['Status'] != 'Manager Emailed')]
+        # Exclude skipped
+        targets = targets[~targets['ID'].isin(st.session_state.skipped_ids)]
         
+        col_header, col_mode = st.columns([2, 1])
+        with col_header:
+            st.subheader(f"Waiting for Manager Email ({len(targets)})")
+        with col_mode:
+            # TOGGLE FOR SPEED MODE
+            rapid_mode = st.toggle("⚡ Rapid Review Mode", value=True, help="Automatically loads the next client. No list selection needed.")
+
         if targets.empty:
             st.success("🎉 Inbox Zero! No pending manager emails.")
+            if st.session_state.skipped_ids:
+                if st.button("Reset Skipped Clients"):
+                    st.session_state.skipped_ids = []
+                    st.rerun()
         else:
-            col_list, col_compose = st.columns([1, 1.5])
+            # ========================================================
+            # LOGIC FOR DETERMINING WHICH CLIENT TO SHOW
+            # ========================================================
+            current_client = None
             
-            with col_list:
-                st.caption(f"Pending: {len(targets)}")
-                event = st.dataframe(
-                    targets[['Name', 'Home Telephone', 'Outcome']], 
-                    on_select="rerun", 
-                    selection_mode="single-row", 
-                    use_container_width=True,
-                    height=700,
-                    key="inbox_list_widget"
-                )
+            if rapid_mode:
+                # In Rapid Mode, always take the TOP row
+                current_client = targets.iloc[0]
+            else:
+                # In List Mode, use the Split View selection
+                col_list, col_compose = st.columns([1, 1.5])
+                with col_list:
+                    event = st.dataframe(
+                        targets[['Name', 'Home Telephone', 'Outcome']], 
+                        on_select="rerun", 
+                        selection_mode="single-row", 
+                        use_container_width=True,
+                        height=700,
+                        key="inbox_list_widget"
+                    )
+                    if len(event.selection.rows) > 0:
+                        row_idx = event.selection.rows[0]
+                        client_id = targets.iloc[row_idx]['ID']
+                        current_client = df[df['ID'] == client_id].iloc[0]
 
-            with col_compose:
-                if len(event.selection.rows) > 0:
-                    row_idx = event.selection.rows[0]
-                    client_id = targets.iloc[row_idx]['ID']
-                    client = df[df['ID'] == client_id].iloc[0]
-                    
+            # ========================================================
+            # RENDER COMPOSER (If a client is selected/active)
+            # ========================================================
+            if current_client is not None:
+                # If Rapid Mode, use full width. If List Mode, use the right column.
+                container = st.container() if rapid_mode else col_compose
+                
+                with container:
+                    # Visual separation for Rapid Mode
+                    if rapid_mode:
+                        st.info(f"⚡ processing **{current_client['Name']}** ({len(targets)} remaining)")
+
                     with st.container(border=True):
-                        st.markdown(f"### 📤 Compose: {client['Name']}")
+                        # --- 1. RECIPIENT SELECTION ---
+                        tp_name = clean_text(current_client.get('Taxpayer First Name'))
+                        tp_last = clean_text(current_client.get('Taxpayer last name'))
+                        tp_email = str(current_client.get('Taxpayer E-mail Address', '')).strip()
                         
-                        # --- 1. RECIPIENT SELECTION (By Name existence, not Email) ---
-                        tp_name = clean_text(client.get('Taxpayer First Name'))
-                        tp_last = clean_text(client.get('Taxpayer last name'))
-                        tp_email = str(client.get('Taxpayer E-mail Address', '')).strip()
-                        
-                        sp_name = clean_text(client.get('Spouse First Name'))
-                        sp_last = clean_text(client.get('Spouse last name'))
-                        sp_email = str(client.get('Spouse E-mail Address', '')).strip()
+                        sp_name = clean_text(current_client.get('Spouse First Name'))
+                        sp_last = clean_text(current_client.get('Spouse last name'))
+                        sp_email = str(current_client.get('Spouse E-mail Address', '')).strip()
 
-                        # Build Radio Options
-                        # Format: "Taxpayer (Name)"
-                        # If Spouse exists, add "Spouse (Name)"
-                        
                         target_map = {"TP": f"Taxpayer: {tp_name}", "SP": f"Spouse: {sp_name}"}
                         options = [target_map["TP"]]
-                        if sp_name: 
-                            options.append(target_map["SP"])
+                        if sp_name: options.append(target_map["SP"])
                         
-                        # Show Radio Button
-                        selected_label = st.radio("Recipient:", options, horizontal=True, key=f"recip_rad_{client_id}")
+                        # In Rapid Mode, default to TP without asking if only TP exists, but show radio if SP exists
+                        selected_label = st.radio("Recipient:", options, horizontal=True, key=f"recip_rad_{current_client['ID']}")
                         
-                        # Determine current context
                         is_spouse = (selected_label == target_map.get("SP"))
                         
                         if is_spouse:
                             target_code = "SP"
                             f_name, l_name = sp_name, sp_last
                             selected_email_addr = sp_email
-                            db_gender = "Unknown" # Default for spouse
+                            db_gender = "Unknown"
                         else:
                             target_code = "TP"
                             f_name, l_name = tp_name, tp_last
                             selected_email_addr = tp_email
-                            db_gender = client.get('Gender', 'Unknown')
+                            db_gender = current_client.get('Gender', 'Unknown')
                             
-                        # Show Email Status
-                        if selected_email_addr:
-                            st.caption(f"📧 Emailing: **{selected_email_addr}**")
-                        else:
-                            st.error(f"❌ No email found for {selected_label}. Please check Database.")
-
+                        if not selected_email_addr:
+                             st.error(f"❌ No email found for {selected_label}.")
+                        
                         if db_gender not in ["Male", "Female", "Unknown"]: db_gender = "Unknown"
 
-                        # --- 2. SETTINGS ROW ---
+                        # --- 2. SETTINGS ---
                         c_g1, c_g2 = st.columns(2)
-                        
-                        # Gender Override
                         conf_gender = c_g1.selectbox(
-                            "Gender", 
-                            ["Male", "Female", "Unknown"], 
+                            "Gender", ["Male", "Female", "Unknown"], 
                             index=["Male", "Female", "Unknown"].index(db_gender),
-                            key=f"gender_select_{client_id}",
-                            help="Required for 'Mr.' or 'Ms.' greetings."
+                            key=f"gender_select_{current_client['ID']}"
                         )
-                        
-                        # Greeting Style
                         greeting_style = c_g2.radio(
-                            "Greeting Style", 
-                            ["Casual", "Formal"], 
-                            index=1, # Default Formal
-                            horizontal=True,
-                            key=f"greet_radio_{client_id}"
+                            "Greeting Style", ["Casual", "Formal"], 
+                            index=1, horizontal=True,
+                            key=f"greet_radio_{current_client['ID']}"
                         )
-                        
-                        # Warning if Formal + Unknown
-                        if greeting_style == "Formal" and conf_gender == "Unknown":
-                            st.caption("⚠️ **Note:** Select Male or Female to use 'Mr.' or 'Ms.'. Currently defaulting to full name.")
 
-                        # --- 3. TEMPLATE SELECTION ---
+                        # --- 3. TEMPLATE ---
                         if not templates.empty:
                             t_options = templates['Type'].unique().tolist()
                             target_template_name = "Ali - Follow Up"
@@ -744,69 +753,50 @@ def render_admin_view(df, df_ref, templates, user_email):
                                 if target_template_name.lower() in opt.lower():
                                     default_t_idx = i; break
                             
-                            selected_template = st.selectbox("Select Template", t_options, index=default_t_idx, key=f"temp_select_{client_id}")
-                            
+                            selected_template = st.selectbox("Select Template", t_options, index=default_t_idx, key=f"temp_select_{current_client['ID']}")
                             t_row = templates[templates['Type'] == selected_template].iloc[0]
                             
-                            # --- 4. GREETING LOGIC (Explicit) ---
-                            # This overrides the global function to ensure it updates exactly how you want here
+                            # Explicit Greeting Logic
                             greeting_line = ""
                             if greeting_style == "Casual":
                                 greeting_line = f"Hi {f_name},"
                             else:
-                                # Formal Logic
-                                if conf_gender == "Male":
-                                    greeting_line = f"Dear Mr. {l_name},"
-                                elif conf_gender == "Female":
-                                    greeting_line = f"Dear Ms. {l_name},"
-                                else:
-                                    # Fallback if Unknown
-                                    greeting_line = f"Dear {f_name} {l_name},"
+                                if conf_gender == "Male": greeting_line = f"Dear Mr. {l_name},"
+                                elif conf_gender == "Female": greeting_line = f"Dear Ms. {l_name},"
+                                else: greeting_line = f"Dear {f_name} {l_name},"
 
                             full_body = f"{greeting_line}\n\n{t_row['Body']}"
                             subj = t_row['Subject']
                             
-                            # --- 5. EDITOR ---
-                            # Dependency key ensures text refreshes if Gender/Target changes
+                            # --- 4. EDITOR ---
                             deps_key = f"{conf_gender}_{greeting_style}_{selected_template}_{target_code}"
+                            final_subj = st.text_input("Subject", value=subj, key=f"subj_{current_client['ID']}_{selected_template}")
+                            final_text = st.text_area("Message Body", value=full_body, height=300, key=f"body_{current_client['ID']}_{deps_key}")
                             
-                            final_subj = st.text_input("Subject", value=subj, key=f"subj_{client_id}_{selected_template}")
-                            final_text = st.text_area("Message Body", value=full_body, height=300, key=f"body_{client_id}_{deps_key}")
-                            
-                            # --- 6. ADD NOTE ---
+                            # --- 5. NOTE ---
                             st.write("**Internal Note**")
-                            new_note = st.text_area("Add note to history (optional)", height=70, placeholder="e.g. Sent pricing info...", key=f"note_{client_id}")
+                            new_note = st.text_area("Add note (optional)", height=70, key=f"note_{current_client['ID']}")
 
-                            # --- 7. PREVIEW & SEND ---
+                            # --- 6. PREVIEW & ACTIONS ---
                             with st.expander("👁️ Preview Email (Visual)", expanded=True):
                                 sig = get_user_signature()
-                                # White background for readability
-                                final_html_preview = f"""
-                                <div style="background-color: white; color: black; padding: 20px; border-radius: 5px; border: 1px solid #ccc;">
-                                    <div style="font-family: sans-serif;">
-                                        {final_text.replace(chr(10), '<br>')}
-                                        <br><br>
-                                        {sig}
-                                    </div>
-                                </div>
-                                """
+                                final_html_preview = f"""<div style="background-color: white; color: black; padding: 20px; border-radius: 5px; border: 1px solid #ccc;">{final_text.replace(chr(10), '<br>')}<br><br>{sig}</div>"""
                                 st.components.v1.html(final_html_preview, height=250, scrolling=True)
-                                
                                 final_html_send = f"{final_text.replace(chr(10), '<br>')}<br><br>{sig}"
 
                             col_send, col_skip = st.columns([2,1])
                             
-                            if col_send.button("🚀 SEND & ARCHIVE", type="primary", use_container_width=True, key=f"btn_send_{client_id}"):
+                            # BUTTON LABEL CHANGES BASED ON MODE
+                            btn_label = "🚀 SEND & NEXT CLIENT" if rapid_mode else "🚀 SEND & ARCHIVE"
+                            
+                            if col_send.button(btn_label, type="primary", use_container_width=True, key=f"btn_send_{current_client['ID']}"):
                                 if not selected_email_addr:
-                                    st.error(f"Cannot send: No email address for {selected_label}!")
+                                    st.error("Cannot send: No email!")
                                 else:
                                     if send_email_as_user(selected_email_addr, final_subj, final_text, final_html_send):
-                                        idx = df.index[df['ID'] == client['ID']][0]
-                                        
+                                        idx = df.index[df['ID'] == current_client['ID']][0]
                                         df.at[idx, 'Status'] = "Manager Emailed"
-                                        # Only update gender if TP
-                                        if target_code == "TP":
-                                            df.at[idx, 'Gender'] = conf_gender
+                                        if target_code == "TP": df.at[idx, 'Gender'] = conf_gender
                                         
                                         if new_note:
                                             existing_notes = str(df.at[idx, 'Notes'])
@@ -815,13 +805,16 @@ def render_admin_view(df, df_ref, templates, user_email):
 
                                         update_data(df, "Clients")
                                         st.toast(f"✅ Sent to {f_name}!")
-                                        time.sleep(1)
+                                        time.sleep(0.5)
                                         st.rerun()
                             
-                            if col_skip.button("❌ Deselect", key=f"btn_close_{client_id}"):
+                            if col_skip.button("⏭️ SKIP", key=f"btn_skip_{current_client['ID']}"):
+                                st.session_state.skipped_ids.append(current_client['ID'])
                                 st.rerun()
-                else:
-                    st.info("👈 Select a client from the list to view the email composer.")
+
+            elif not rapid_mode:
+                with col_compose:
+                    st.info("👈 Select a client to view details.")
 
     # ==========================
     # VIEW 3: DATABASE SEARCH
@@ -829,39 +822,29 @@ def render_admin_view(df, df_ref, templates, user_email):
     elif selected_view == "🔍 Database (Fix)":
         st.subheader("Database Search & Edit")
         col_search, col_admin_edit = st.columns([1, 2])
-        
         with col_search:
             st.write("### 🔎 List")
             search_query = st.text_input("Search", key="admin_search_query")
-            
             if search_query:
                 res = df[df['Name'].astype(str).str.contains(search_query, case=False, na=False)]
                 if not res.empty:
-                    st.caption(f"Found {len(res)} results:")
                     for i, row in res.iterrows():
                         with st.container(border=True):
                             st.markdown(f"**{row['Name']}**")
-                            st.caption(f"Status: {row['Status']}")
                             if st.button("EDIT", key=f"admin_load_{row['ID']}", use_container_width=True):
                                 st.session_state.admin_current_id = row['ID']
                 else:
                     st.warning("No matches.")
-            else:
-                st.info("Start typing to search.")
-
         with col_admin_edit:
             st.write("### 📝 Editor")
             if st.session_state.get('admin_current_id'):
                 render_client_card_editor(df, df_ref, templates, st.session_state.admin_current_id)
-            else:
-                st.caption("Select a client from the list on the left to edit.")
 
     # ==========================
     # VIEW 4: TEMPLATES
     # ==========================
     elif selected_view == "📝 Templates":
         render_template_manager()
-
 # ==========================================
 # 10. MAIN ROUTER
 # ==========================================
