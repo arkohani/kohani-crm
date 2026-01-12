@@ -598,6 +598,8 @@ def render_template_manager():
 # ==========================================
 def render_admin_view(df, df_ref, templates, user_email):
     st.title("🔒 Admin Dashboard")
+    
+    # Top Stats
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Clients", len(df))
     c2.metric("Calls Made", len(df[df['Status'] != 'New']))
@@ -605,126 +607,176 @@ def render_admin_view(df, df_ref, templates, user_email):
     c4.metric("Success", len(df[df['Outcome'] == 'Yes']))
     st.markdown("---")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Activity", "📥 Inbox", "🔍 Database (Fix)", "📝 Templates"])
+    # --- PERSISTENT NAVIGATION (Fixes the "Pop to Activity" bug) ---
+    # We use st.radio instead of st.tabs so we can control the active state
+    if "admin_nav" not in st.session_state:
+        st.session_state.admin_nav = "📥 Inbox"
     
-    with tab1:
+    nav_options = ["📊 Activity", "📥 Inbox", "🔍 Database (Fix)", "📝 Templates"]
+    
+    # Ensure current state is valid
+    if st.session_state.admin_nav not in nav_options:
+        st.session_state.admin_nav = "📥 Inbox"
+        
+    selected_view = st.radio(
+        "Admin Navigation", 
+        nav_options, 
+        index=nav_options.index(st.session_state.admin_nav),
+        horizontal=True,
+        label_visibility="collapsed",
+        key="admin_nav_radio",
+        on_change=lambda: st.session_state.update(admin_nav=st.session_state.admin_nav_radio)
+    )
+    
+    # Update session state to match radio (just in case)
+    st.session_state.admin_nav = selected_view
+
+    st.markdown("---")
+
+    # ==========================
+    # VIEW 1: ACTIVITY
+    # ==========================
+    if selected_view == "📊 Activity":
         st.subheader("All Call Logs")
         activity = df[df['Status'] != 'New'].sort_values(by='Last_Updated', ascending=False)
-        st.dataframe(activity[['Name', 'Status', 'Outcome', 'Last_Updated', 'Last_Agent']])
+        st.dataframe(activity[['Name', 'Status', 'Outcome', 'Last_Updated', 'Last_Agent']], use_container_width=True)
 
-    with tab2:
-            st.subheader("Waiting for Manager Email")
-            # Filter for targets
-            targets = df[(df['Outcome'] == 'Yes') & (df['Status'] != 'Manager Emailed')]
+    # ==========================
+    # VIEW 2: INBOX (Manager Emails)
+    # ==========================
+    elif selected_view == "📥 Inbox":
+        st.subheader("Waiting for Manager Email")
+        
+        # 1. Get Targets
+        targets = df[(df['Outcome'] == 'Yes') & (df['Status'] != 'Manager Emailed')]
+        
+        if targets.empty:
+            st.success("🎉 Inbox Zero! No pending manager emails.")
+        else:
+            # 2. Layout: Split Screen
+            col_list, col_compose = st.columns([1, 1.5])
             
-            if targets.empty:
-                st.success("🎉 Inbox Zero! No pending manager emails.")
-            else:
-                # Layout: Left (List) | Right (Compose)
-                col_list, col_compose = st.columns([1, 1.5])
-                
-                with col_list:
-                    st.caption(f"Pending: {len(targets)}")
-                    # Use selection_mode='single-row' and on_select='rerun' 
-                    # to instantly update the right column when clicked
-                    event = st.dataframe(
-                        targets[['Name', 'Home Telephone', 'Outcome']], 
-                        on_select="rerun", 
-                        selection_mode="single-row", 
-                        use_container_width=True,
-                        height=500,
-                        key="inbox_list"
-                    )
-    
-                with col_compose:
-                    # Check if a row is selected
-                    if len(event.selection.rows) > 0:
-                        row_idx = event.selection.rows[0]
-                        client_id = targets.iloc[row_idx]['ID']
-                        # Get fresh client data
-                        client = df[df['ID'] == client_id].iloc[0]
-                        
-                        with st.container(border=True):
-                            st.markdown(f"### 📤 Compose: {client['Name']}")
-                            st.caption(f"Phone: {client['Home Telephone']} | Email: {client['Taxpayer E-mail Address']}")
-                            
-                            # --- 1. GENDER & GREETING DEFAULTS ---
-                            c_g1, c_g2 = st.columns(2)
-                            
-                            # Gender logic
-                            client_gender = client.get('Gender', 'Unknown')
-                            if client_gender not in ["Male", "Female", "Unknown"]: client_gender = "Unknown"
-                            conf_gender = c_g1.selectbox("Confirm Gender", ["Male", "Female", "Unknown"], index=["Male", "Female", "Unknown"].index(client_gender))
-                            
-                            # DEFAULT: Set to 'Formal' automatically (Index 1)
-                            greeting_style = c_g2.radio("Greeting Style", ["Casual", "Formal"], index=1, horizontal=True)
-    
-                            # --- 2. TEMPLATE SELECTION DEFAULT ---
-                            if not templates.empty:
-                                t_options = templates['Type'].unique().tolist()
-                                
-                                # DEFAULT: Look for 'Ali - Follow Up'
-                                # If it exists, use it. If not, default to 0.
-                                target_template = "Ali - Follow Up"
-                                default_idx = 0
-                                
-                                # Case-insensitive search for your preferred template
-                                for i, opt in enumerate(t_options):
-                                    if target_template.lower() in opt.lower():
-                                        default_t_idx = i
-                                        break
-                                
-                                selected_template = st.selectbox("Select Template", t_options, index=default_idx)
-                                
-                                # Generate Content
-                                t_row = templates[templates['Type'] == selected_template].iloc[0]
-                                f_name = clean_text(client.get('Taxpayer First Name')) or "Client"
-                                l_name = clean_text(client.get('Taxpayer last name'))
-                                
-                                greeting_line = generate_greeting(greeting_style, f_name, l_name, conf_gender)
-                                full_body = f"{greeting_line}\n\n{t_row['Body']}"
-                                subj = t_row['Subject']
-                                
-                                final_subj = st.text_input("Subject", value=subj)
-                                final_text = st.text_area("Message Body", value=full_body, height=300)
-                                
-                                # Preview Toggle
-                                with st.expander("👁️ Preview Email"):
-                                    sig = get_user_signature()
-                                    final_html = f"{final_text.replace(chr(10), '<br>')}<br><br>{sig}"
-                                    st.components.v1.html(final_html, height=200, scrolling=True)
-    
-                                col_send, col_skip = st.columns([2,1])
-                                
-                                if col_send.button("🚀 SEND & ARCHIVE", type="primary", use_container_width=True):
-                                    recipient = client['Taxpayer E-mail Address']
-                                    if not recipient:
-                                        st.error("Client has no email address!")
-                                    else:
-                                        # Send logic
-                                        if send_email_as_user(recipient, final_subj, final_text, final_html):
-                                            idx = df.index[df['ID'] == client['ID']][0]
-                                            df.at[idx, 'Status'] = "Manager Emailed"
-                                            df.at[idx, 'Gender'] = conf_gender
-                                            update_data(df, "Clients")
-                                            st.toast(f"✅ Sent to {client['Name']}!")
-                                            time.sleep(1)
-                                            st.rerun()
-                                            
-                                if col_skip.button("❌ Deselect"):
-                                    st.rerun()
-                    else:
-                        st.info("👈 Select a client from the list to view the email composer.")
-                        st.markdown("Use this list to rapidly process pending manager emails.")
+            with col_list:
+                st.caption(f"Pending: {len(targets)}")
+                # Display List
+                event = st.dataframe(
+                    targets[['Name', 'Home Telephone', 'Outcome']], 
+                    on_select="rerun", 
+                    selection_mode="single-row", 
+                    use_container_width=True,
+                    height=600,
+                    key="inbox_list_widget"
+                )
 
-    with tab3: 
+            with col_compose:
+                # Check Selection
+                if len(event.selection.rows) > 0:
+                    row_idx = event.selection.rows[0]
+                    client_id = targets.iloc[row_idx]['ID']
+                    client = df[df['ID'] == client_id].iloc[0]
+                    
+                    with st.container(border=True):
+                        st.markdown(f"### 📤 Compose: {client['Name']}")
+                        st.caption(f"Phone: {client['Home Telephone']} | Email: {client['Taxpayer E-mail Address']}")
+                        
+                        # --- GENDER & GREETING ---
+                        c_g1, c_g2 = st.columns(2)
+                        
+                        # Gender Logic
+                        client_gender = client.get('Gender', 'Unknown')
+                        if client_gender not in ["Male", "Female", "Unknown"]: client_gender = "Unknown"
+                        
+                        # Widget: Confirm Gender
+                        conf_gender = c_g1.selectbox(
+                            "Confirm Gender", 
+                            ["Male", "Female", "Unknown"], 
+                            index=["Male", "Female", "Unknown"].index(client_gender),
+                            key=f"gender_select_{client_id}" # Unique key prevents state clashes
+                        )
+                        
+                        # Widget: Greeting Style (Default to Formal)
+                        greeting_style = c_g2.radio(
+                            "Greeting Style", 
+                            ["Casual", "Formal"], 
+                            index=1, # Default to Formal
+                            horizontal=True,
+                            key=f"greet_radio_{client_id}"
+                        )
+
+                        # --- TEMPLATE SELECTION ---
+                        if not templates.empty:
+                            t_options = templates['Type'].unique().tolist()
+                            
+                            # Default Logic: Search for "Ali - Follow Up"
+                            target_template_name = "Ali - Follow Up"
+                            default_t_idx = 0
+                            
+                            # Find index of preferred template
+                            for i, opt in enumerate(t_options):
+                                if target_template_name.lower() in opt.lower():
+                                    default_t_idx = i
+                                    break
+                            
+                            # Widget: Template Select
+                            selected_template = st.selectbox(
+                                "Select Template", 
+                                t_options, 
+                                index=default_t_idx,
+                                key=f"temp_select_{client_id}"
+                            )
+                            
+                            # Generate Content based on selection
+                            t_row = templates[templates['Type'] == selected_template].iloc[0]
+                            f_name = clean_text(client.get('Taxpayer First Name')) or "Client"
+                            l_name = clean_text(client.get('Taxpayer last name'))
+                            
+                            greeting_line = generate_greeting(greeting_style, f_name, l_name, conf_gender)
+                            full_body = f"{greeting_line}\n\n{t_row['Body']}"
+                            subj = t_row['Subject']
+                            
+                            # --- EDITOR ---
+                            final_subj = st.text_input("Subject", value=subj, key=f"subj_{client_id}")
+                            final_text = st.text_area("Message Body", value=full_body, height=300, key=f"body_{client_id}")
+                            
+                            # --- PREVIEW & SEND ---
+                            with st.expander("👁️ Preview Email"):
+                                sig = get_user_signature()
+                                final_html = f"{final_text.replace(chr(10), '<br>')}<br><br>{sig}"
+                                st.components.v1.html(final_html, height=200, scrolling=True)
+
+                            col_send, col_skip = st.columns([2,1])
+                            
+                            if col_send.button("🚀 SEND & ARCHIVE", type="primary", use_container_width=True, key=f"btn_send_{client_id}"):
+                                recipient = client['Taxpayer E-mail Address']
+                                if not recipient:
+                                    st.error("Client has no email address!")
+                                else:
+                                    # Send Email
+                                    if send_email_as_user(recipient, final_subj, final_text, final_html):
+                                        # Update DB
+                                        idx = df.index[df['ID'] == client['ID']][0]
+                                        df.at[idx, 'Status'] = "Manager Emailed"
+                                        df.at[idx, 'Gender'] = conf_gender
+                                        update_data(df, "Clients")
+                                        
+                                        st.toast(f"✅ Sent to {client['Name']}!")
+                                        time.sleep(1)
+                                        st.rerun()
+                            
+                            if col_skip.button("❌ Deselect", key=f"btn_close_{client_id}"):
+                                st.rerun()
+                else:
+                    st.info("👈 Select a client from the list to view the email composer.")
+
+    # ==========================
+    # VIEW 3: DATABASE SEARCH
+    # ==========================
+    elif selected_view == "🔍 Database (Fix)":
         st.subheader("Database Search & Edit")
-        # --- FEATURE 2: SPLIT VIEW TO PREVENT JUMPING ---
         col_search, col_admin_edit = st.columns([1, 2])
         
         with col_search:
             st.write("### 🔎 List")
-            # Persist search query
             search_query = st.text_input("Search", key="admin_search_query")
             
             if search_query:
@@ -732,13 +784,11 @@ def render_admin_view(df, df_ref, templates, user_email):
                 if not res.empty:
                     st.caption(f"Found {len(res)} results:")
                     for i, row in res.iterrows():
-                        # Use a small container per result
                         with st.container(border=True):
                             st.markdown(f"**{row['Name']}**")
                             st.caption(f"Status: {row['Status']}")
                             if st.button("EDIT", key=f"admin_load_{row['ID']}", use_container_width=True):
                                 st.session_state.admin_current_id = row['ID']
-                                # No rerun needed here specifically if we just want to update the right column
                 else:
                     st.warning("No matches.")
             else:
@@ -751,7 +801,10 @@ def render_admin_view(df, df_ref, templates, user_email):
             else:
                 st.caption("Select a client from the list on the left to edit.")
 
-    with tab4:
+    # ==========================
+    # VIEW 4: TEMPLATES
+    # ==========================
+    elif selected_view == "📝 Templates":
         render_template_manager()
 
 # ==========================================
