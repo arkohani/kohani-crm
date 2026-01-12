@@ -124,7 +124,12 @@ def send_email_as_user(to_email, subject, body_text, body_html):
         sender_header = f"{st.session_state.user_name} <{st.session_state.user_email}>"
         message['to'] = to_email
         message['from'] = sender_header 
-        message['cc'] = ADMIN_EMAIL 
+        
+        # Only CC if the sender is NOT the admin
+        # using .lower() to ensure case-insensitive comparison
+        if st.session_state.user_email.lower() != ADMIN_EMAIL.lower():
+            message['cc'] = ADMIN_EMAIL 
+            
         message['subject'] = subject
         
         part1 = MIMEText(body_text, 'plain')
