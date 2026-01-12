@@ -1,4 +1,4 @@
-import streamlit as st
+default_idximport streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
@@ -666,7 +666,7 @@ def render_admin_view(df, df_ref, templates, user_email):
                                 # DEFAULT: Look for 'Ali - Follow Up'
                                 # If it exists, use it. If not, default to 0.
                                 target_template = "Ali - Follow Up"
-                                default_t_idx = 0
+                                default_idx = 0
                                 
                                 # Case-insensitive search for your preferred template
                                 for i, opt in enumerate(t_options):
