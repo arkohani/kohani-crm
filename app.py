@@ -15,6 +15,7 @@ import socket
 import re
 import uuid
 import io
+import json
 
 # ==========================================
 # 0. CONFIG & SAFETY
@@ -27,7 +28,8 @@ st.markdown("""
     #MainMenu {display: none;}
     header {visibility: hidden;}
     .stDataFrame { border: 1px solid #ddd; border-radius: 5px; }
-    .instruction-box { background-color: #f0f2f6; padding: 15px; border-radius: 8px; border-left: 5px solid #ff4b4b; }
+    .internal-box { border-left: 5px solid #ff4b4b; background-color: #fff1f0; padding: 10px; border-radius: 5px; }
+    .client-box { border-left: 5px solid #28a745; background-color: #f0fff4; padding: 10px; border-radius: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -35,12 +37,8 @@ st.markdown("""
 # 🛑 CONFIGURATION REQUIRED HERE 🛑
 # ==========================================
 ADMIN_EMAIL = "ali@kohani.com"
-
-# 1. PASTE YOUR SHARED DRIVE FOLDER ID HERE 👇
-ROOT_DRIVE_FOLDER_ID = "0AF0LoD230jIaUk9PVA" 
-
-# 2. PASTE YOUR APP URL HERE 👇 (No trailing slash)
-APP_BASE_URL = "https://kohani-crm.streamlit.app/" 
+ROOT_DRIVE_FOLDER_ID = "0AF0LoD230jIaUk9PVA" # <--- PASTE YOUR FOLDER ID HERE
+APP_BASE_URL = "https://kohani-crm.streamlit.app" 
 
 
 SCOPES_GMAIL = [
@@ -182,28 +180,20 @@ def update_cell(sheet_name, row_idx, col_idx, value):
     get_all_data.clear()
 
 # ==========================================
-# 3. DRIVE & UPLOAD (SHARED DRIVE VERSION)
+# 3. DRIVE & UPLOAD
 # ==========================================
 def create_drive_folder(folder_name):
-    """Creates folder INSIDE the Shared Drive Root."""
     if not ROOT_DRIVE_FOLDER_ID:
         st.error("ADMIN ERROR: ROOT_DRIVE_FOLDER_ID not set in code.")
         return None
-        
     service = get_drive_service()
-    
     file_metadata = {
         'name': folder_name,
         'mimeType': 'application/vnd.google-apps.folder',
         'parents': [ROOT_DRIVE_FOLDER_ID]
     }
-    
     try:
-        file = service.files().create(
-            body=file_metadata, 
-            fields='id', 
-            supportsAllDrives=True
-        ).execute()
+        file = service.files().create(body=file_metadata, fields='id', supportsAllDrives=True).execute()
         return file.get('id')
     except Exception as e:
         st.error(f"Drive Error: {e}")
@@ -215,17 +205,12 @@ def upload_file_to_drive(uploaded_file, folder_id):
         file_metadata = {'name': uploaded_file.name, 'parents': [folder_id]}
         fh = io.BytesIO(uploaded_file.getvalue())
         media = MediaIoBaseUpload(fh, mimetype=uploaded_file.type, resumable=True)
-        service.files().create(
-            body=file_metadata, 
-            media_body=media, 
-            fields='id',
-            supportsAllDrives=True
-        ).execute()
+        service.files().create(body=file_metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
         return True
     except: return False
 
 def render_public_upload_portal(token):
-    # CLIENT VIEW: DOCUMENT UPLOAD & INSTRUCTIONS
+    # --- CLIENT VIEW ---
     st.markdown("## 📤 Client Portal")
     data = get_all_data()
     df_tasks = data.get('Tasks', pd.DataFrame())
@@ -234,51 +219,69 @@ def render_public_upload_portal(token):
         st.error("System error."); return
 
     task = df_tasks[df_tasks['Upload_Token'] == token]
-    if task.empty:
-        st.error("⚠️ Invalid or expired link."); return
+    if task.empty: st.error("⚠️ Invalid link."); return
         
     task_row = task.iloc[0]
     entity_id = task_row['Entity_ID']
     service_name = task_row['Service_Name']
     
-    # 1. Show Instructions (Checklist)
-    st.markdown("### 📋 Instructions")
-    instructions = task_row.get('Client_Instructions', '')
-    if instructions:
-        st.markdown(f'<div class="instruction-box">{instructions.replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
-    else:
-        st.info(f"Please upload documents for: **{service_name}**")
+    st.info(f"Task: **{service_name}**")
+    
+    # --- CHECKLIST LOGIC ---
+    instr = task_row.get('Client_Instructions', '')
+    saved_state_str = task_row.get('Client_Checklist_State', '')
+    
+    # Parse existing state
+    checked_items = []
+    if saved_state_str:
+        try: checked_items = json.loads(saved_state_str)
+        except: checked_items = []
+        
+    new_checked_items = []
+    
+    if instr:
+        st.write("### 📋 Your Checklist")
+        st.caption("Check items as you complete them and click 'Save Progress'.")
+        lines = [x.strip() for x in instr.split('\n') if x.strip()]
+        
+        for line in lines:
+            # Check if this line was previously checked
+            is_checked = line in checked_items
+            if st.checkbox(line, value=is_checked, key=f"chk_{line[:15]}"):
+                new_checked_items.append(line)
+        
+        if st.button("💾 Save Checklist Progress"):
+            t_idx = df_tasks.index[df_tasks['Upload_Token'] == token][0] + 2
+            # Save to Column 11 (K)
+            json_dump = json.dumps(new_checked_items)
+            update_cell("Tasks", t_idx, 11, json_dump)
+            st.toast("Progress Saved!")
+            time.sleep(1)
+            st.rerun()
 
-    # 2. Upload Section
+    # --- UPLOAD LOGIC ---
     df_ent = data.get('Entities')
     entity = df_ent[df_ent['ID'] == entity_id].iloc[0]
     drive_id = entity.get('Drive_Folder_ID')
     
-    if not drive_id:
-        st.warning("Secure folder not set up for this client. Please contact us."); return
+    if not drive_id: st.warning("Folder not connected."); return
 
-    st.write("---")
-    st.write(f"**Upload files for: {entity['Name']}**")
+    st.write("### 📤 Upload Files")
     files = st.file_uploader("Select files", accept_multiple_files=True)
     if st.button("🚀 Upload Files", type="primary"):
         if files:
-            with st.status("Uploading securely..."):
+            with st.status("Uploading..."):
                 for f in files: upload_file_to_drive(f, drive_id)
-            st.balloons(); st.success("✅ Files uploaded successfully!")
+            st.balloons(); st.success("✅ Files uploaded!")
     
     st.write("---")
-    # 3. Mark Complete Button
     if task_row['Status'] != 'Done':
-        if st.button("✅ I have finished uploading everything"):
-            # Update Task Status to 'Done'
-            # Find row index
+        if st.button("✅ I have finished everything"):
             t_idx = df_tasks.index[df_tasks['Upload_Token'] == token][0] + 2
-            update_cell("Tasks", t_idx, 5, "Done") # Col 5 is Status
-            st.success("Thank you! We have been notified.")
-            time.sleep(2)
-            st.rerun()
+            update_cell("Tasks", t_idx, 5, "Done")
+            st.success("Thank you! The team has been notified.")
     else:
-        st.success("✅ This task is marked as Complete.")
+        st.success("✅ Task Complete.")
 
 # ==========================================
 # 4. AUTOMATION
@@ -326,8 +329,8 @@ def run_daily_automation(data, force=False):
                         mask = (df_tasks['Entity_ID'] == e_id) & (df_tasks['Service_Name'] == s_name) & (df_tasks['Due_Date'] == due_str)
                         if not df_tasks[mask].empty: dup = True
                     if not dup:
-                        # Add blank for Client Instructions (Col 9)
-                        new_tasks.append([generate_id("T"), e_id, s_name, due_str, "Not Started", str(uuid.uuid4()), "", "", ""])
+                        # Append blank cols for Client_Instruct, Internal_Workflow, Client_Check_State
+                        new_tasks.append([generate_id("T"), e_id, s_name, due_str, "Not Started", str(uuid.uuid4()), "", "", "", "", ""])
     
     if new_tasks:
         for t in new_tasks: append_to_sheet("Tasks", t)
@@ -347,35 +350,18 @@ def render_migration_tool(data):
         st.write(f"Found {len(df_old)} legacy rows.")
         if st.button("🚀 Run Batch Migration"):
             batch_e = []; batch_c = []; batch_r = []
-            progress = st.progress(0)
             for i, row in df_old.iterrows():
-                eid = generate_id("E")
-                nm = row.get('Name') or "Unknown"
+                eid = generate_id("E"); nm = row.get('Name') or "Unknown"
                 batch_e.append([eid, nm, "Unknown", "", "", "", ""])
-                cid = generate_id("C")
-                tp_n = row.get('Taxpayer First Name') or nm
-                batch_c.append([
-                    cid, tp_n, row.get('Taxpayer last name', ''), 
-                    row.get('Taxpayer E-mail Address', ''), 
-                    row.get('Home Telephone', ''), "Taxpayer", "", 
-                    row.get('Status', 'New'), row.get('Outcome', ''), 
-                    row.get('Last_Agent', ''), row.get('Last_Updated', '')
-                ])
+                cid = generate_id("C"); tp_n = row.get('Taxpayer First Name') or nm
+                batch_c.append([cid, tp_n, row.get('Taxpayer last name', ''), row.get('Taxpayer E-mail Address', ''), row.get('Home Telephone', ''), "Taxpayer", "", row.get('Status', 'New'), row.get('Outcome', ''), row.get('Last_Agent', ''), row.get('Last_Updated', '')])
                 batch_r.append([eid, cid, "Owner", "100%"])
-                if row.get('Spouse First Name'):
-                    cid2 = generate_id("C")
-                    batch_c.append([
-                        cid2, row.get('Spouse First Name'), row.get('Spouse last name', ''),
-                        row.get('Spouse E-mail Address', ''), "", "Spouse", "", "New", "", "", ""
-                    ])
-                    batch_r.append([eid, cid2, "Spouse", ""])
-            
             cl = get_db_client()
             sh = cl.open_by_key(st.secrets["connections"]["gsheets"]["spreadsheet"].split("/")[5])
             if batch_e: sh.worksheet("Entities").append_rows(batch_e)
             if batch_c: sh.worksheet("Contacts").append_rows(batch_c)
             if batch_r: sh.worksheet("Relationships").append_rows(batch_r)
-            st.success("Done!"); time.sleep(2); st.rerun()
+            st.success("Done!"); st.rerun()
 
 # ==========================================
 # 6. MAIN APP
@@ -398,9 +384,7 @@ else:
     with st.sidebar:
         st.write(f"👤 **{st.session_state.user_name}**")
         nav = st.radio("Navigation", ["📊 Dashboard", "📞 Call Queue", "🏢 Entities", "👥 Contacts", "✅ Production (Tasks)", "🔒 Admin"])
-        if st.button("Logout"):
-            del st.session_state.creds
-            st.rerun()
+        if st.button("Logout"): del st.session_state.creds; st.rerun()
 
     # --- DASHBOARD ---
     if nav == "📊 Dashboard":
@@ -409,66 +393,66 @@ else:
         df_ent = data_dict.get('Entities', pd.DataFrame())
         c1, c2, c3 = st.columns(3)
         c1.metric("Active Entities", len(df_ent) if not df_ent.empty else 0)
-        pending = len(df_tasks[df_tasks['Status'] != 'Done']) if not df_tasks.empty else 0
+        
+        pending = 0
+        if not df_tasks.empty and 'Status' in df_tasks.columns:
+            pending = len(df_tasks[df_tasks['Status'] != 'Done'])
         c2.metric("Pending Tasks", pending)
         c3.metric("System Status", "Online 🟢")
+        
+        if not df_tasks.empty and 'Status' in df_tasks.columns:
+            st.subheader("Recently Completed")
+            done = df_tasks[df_tasks['Status'] == 'Done']
+            if not done.empty:
+                df_full = done.merge(df_ent[['ID', 'Name']], left_on='Entity_ID', right_on='ID', how='left')
+                st.dataframe(df_full[['Name', 'Service_Name', 'Due_Date']], use_container_width=True)
 
     # --- CALL QUEUE ---
     elif nav == "📞 Call Queue":
-        st.title("📞 Call Queue & CRM")
+        st.title("📞 Call Queue")
         df_con = data_dict.get('Contacts', pd.DataFrame())
-        if df_con.empty:
-            st.warning("No contacts.")
+        if df_con.empty: st.warning("No contacts."); st.stop()
+        
+        if st.session_state.get('call_id') is None:
+            c1, c2 = st.columns(2)
+            with c1:
+                queue = df_con[df_con['Status'].isin(['New', 'Follow Up'])] if 'Status' in df_con.columns else pd.DataFrame()
+                st.write(f"**{len(queue)}** in queue")
+                if st.button("🎲 START CALL"):
+                    if not queue.empty: st.session_state.call_id = queue.sample(1).iloc[0]['ID']; st.rerun()
+            with c2:
+                q = st.text_input("Search Contact")
+                if q:
+                    res = df_con[df_con['First Name'].str.contains(q, case=False, na=False)]
+                    for _, r in res.iterrows():
+                        if st.button(f"Load: {r['First Name']} {r['Last Name']}", key=r['ID']):
+                            st.session_state.call_id = r['ID']; st.rerun()
         else:
-            if st.session_state.get('call_id') is None:
+            cid = st.session_state.call_id
+            row = df_con[df_con['ID'] == cid].iloc[0]
+            idx = df_con.index[df_con['ID'] == cid][0] + 2
+            with st.container(border=True):
+                st.subheader(f"{row['First Name']} {row['Last Name']}")
+                if st.button("Exit"): st.session_state.call_id = None; st.rerun()
                 c1, c2 = st.columns(2)
-                with c1:
-                    queue = df_con[df_con['Status'].isin(['New', 'Follow Up', 'Left Message'])] if 'Status' in df_con.columns else pd.DataFrame()
-                    st.write(f"**{len(queue)}** in queue")
-                    if st.button("🎲 START CALL"):
-                        if not queue.empty:
-                            st.session_state.call_id = queue.sample(1).iloc[0]['ID']
-                            st.rerun()
-                with c2:
-                    q = st.text_input("Search Contact")
-                    if q:
-                        res = df_con[df_con['First Name'].str.contains(q, case=False, na=False) | df_con['Phone'].str.contains(q, na=False)]
-                        for _, r in res.iterrows():
-                            if st.button(f"Load: {r['First Name']} {r['Last Name']}", key=r['ID']):
-                                st.session_state.call_id = r['ID']; st.rerun()
-            else:
-                cid = st.session_state.call_id
-                row = df_con[df_con['ID'] == cid].iloc[0]
-                idx = df_con.index[df_con['ID'] == cid][0] + 2
-                with st.container(border=True):
-                    st.subheader(f"{row['First Name']} {row['Last Name']}")
-                    if st.button("Exit"): st.session_state.call_id = None; st.rerun()
-                    c1, c2 = st.columns(2)
-                    ph = c1.text_input("Phone", row.get('Phone'))
-                    em = c2.text_input("Email", row.get('Email'))
-                    st.text_area("History", row.get('Notes', ''), disabled=True, height=100)
-                    note = st.text_area("New Note")
-                    s1, s2 = st.columns(2)
-                    stat = s1.selectbox("Status", ["New", "Left Message", "Talked", "Wrong Number"], index=0)
-                    out = s2.selectbox("Outcome", ["Pending", "Yes", "No"], index=0)
-                    if st.button("Save"):
-                        update_cell("Contacts", idx, 5, ph)
-                        update_cell("Contacts", idx, 4, em)
-                        update_cell("Contacts", idx, 8, stat)
-                        update_cell("Contacts", idx, 9, out)
-                        update_cell("Contacts", idx, 10, st.session_state.user_email)
-                        update_cell("Contacts", idx, 11, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
-                        if note: update_cell("Contacts", idx, 7, f"{row.get('Notes','')}\n[{datetime.datetime.now()}] {note}")
-                        st.session_state.call_id = None; st.rerun()
+                ph = c1.text_input("Phone", row.get('Phone'))
+                em = c2.text_input("Email", row.get('Email'))
+                st.text_area("History", row.get('Notes', ''), disabled=True, height=100)
+                note = st.text_area("New Note")
+                if st.button("Save"):
+                    update_cell("Contacts", idx, 5, ph); update_cell("Contacts", idx, 4, em)
+                    if note: update_cell("Contacts", idx, 7, f"{row.get('Notes','')}\n[{datetime.datetime.now()}] {note}")
+                    st.session_state.call_id = None; st.rerun()
 
     # --- ENTITIES ---
     elif nav == "🏢 Entities":
         st.title("Entity Manager")
         df_ent = data_dict.get('Entities')
+        df_tasks = data_dict.get('Tasks', pd.DataFrame())
         df_rel = data_dict.get('Relationships')
         df_con = data_dict.get('Contacts')
         
-        c1, c2 = st.columns([1, 2])
+        c1, c2 = st.columns([1, 3])
         with c1:
             q = st.text_input("Search Entity")
             if st.button("➕ New"): st.session_state.new_ent = True
@@ -490,66 +474,35 @@ else:
                 ent = df_ent[df_ent['ID'] == eid].iloc[0]
                 st.header(ent['Name'])
                 
-                t1, t2, t3 = st.tabs(["Info & Drive", "People", "Services"])
+                t1, t2, t3 = st.tabs(["Tasks & Docs", "People", "Settings"])
                 with t1:
-                    e_idx = df_ent.index[df_ent['ID'] == eid][0] + 2
-                    
-                    types = ["Individual", "LLC", "S-Corp", "C-Corp", "Partnership", "Non-Profit", "Trust", "Unknown"]
-                    curr_type = ent.get('Type', 'Individual')
-                    if curr_type not in types: curr_type = "Unknown"
-                    nt = st.selectbox("Type", types, index=types.index(curr_type))
-                    
-                    nf = st.text_input("FEIN", ent.get('FEIN', ''))
-                    if st.button("Update Info"):
-                        update_cell("Entities", e_idx, 3, nt)
-                        update_cell("Entities", e_idx, 4, nf)
-                        st.rerun()
-                    
-                    # DRIVE LOGIC
-                    did = ent.get('Drive_Folder_ID')
-                    if did and len(str(did)) > 5:
-                        st.success(f"Connected: {did}")
-                        st.markdown(f"[Open Drive Folder](https://drive.google.com/drive/u/0/folders/{did})")
-                        
-                        # SAFETY UNLINK
-                        with st.expander("⚠️ Advanced / Reset"):
-                            st.warning("Only reset if you deleted the folder in Drive manually.")
-                            if st.checkbox("I understand this breaks the link"):
-                                if st.button("❌ Unlink/Reset Folder"):
-                                    update_cell("Entities", e_idx, 7, "")
-                                    st.rerun()
-                    else:
-                        if st.button("📂 Create Shared Folder"):
-                            # NAME CLEANUP: Just use Name, no ID
-                            fid = create_drive_folder(ent['Name'])
-                            if fid:
-                                update_cell("Entities", e_idx, 7, fid)
-                                st.rerun()
-
+                    if not df_tasks.empty:
+                        my_tasks = df_tasks[df_tasks['Entity_ID'] == eid]
+                        if not my_tasks.empty:
+                            for _, t in my_tasks.iterrows():
+                                color_cls = "task-pending" if t['Status'] != "Done" else ""
+                                st.markdown(f"<div class='task-card {color_cls}'><b>{t['Service_Name']}</b> | Status: {t['Status']}</div>", unsafe_allow_html=True)
+                        else: st.info("No active tasks.")
                 with t2:
                     if not df_rel.empty:
                         for _, r in df_rel[df_rel['Entity_ID'] == eid].iterrows():
                             c = df_con[df_con['ID'] == r['Contact_ID']]
-                            if not c.empty: st.write(f"👤 {c.iloc[0]['First Name']} ({r['Role']})")
+                            if not c.empty: st.write(f"👤 {c.iloc[0]['First Name']} {c.iloc[0]['Last Name']} ({r['Role']})")
+                    st.write("---")
+                    search_p = st.text_input("Link Existing Person")
+                    if search_p and not df_con.empty:
+                        found = df_con[df_con['First Name'].str.contains(search_p, case=False, na=False)]
+                        if not found.empty:
+                            sel_p = st.selectbox("Select", found.apply(lambda x: f"{x['First Name']} {x['Last Name']} (ID: {x['ID']})", axis=1))
+                            role = st.selectbox("Role", ["Owner", "Partner", "Officer"])
+                            if st.button("Link"):
+                                append_to_sheet("Relationships", [eid, sel_p.split("(ID: ")[1][:-1], role, ""])
+                                st.success("Linked!"); st.rerun()
                 with t3:
-                    df_set = data_dict.get('Services_Settings')
-                    new_s = st.selectbox("Assign Service", df_set['Service_Name'].unique()) if not df_set.empty else None
-                    if st.button("Add"):
-                        append_to_sheet("Services_Assigned", [eid, new_s, datetime.datetime.now().strftime("%Y-%m-%d"), ""])
-                        st.rerun()
-                    curr = data_dict.get('Services_Assigned')
-                    if not curr.empty: st.dataframe(curr[curr['Entity_ID'] == eid][['Service_Name']])
-
-    # --- CONTACTS (SEARCH ONLY) ---
-    elif nav == "👥 Contacts":
-        st.title("Contacts Directory")
-        st.info("🔒 Secure Search Mode")
-        q = st.text_input("Search by Name or Phone")
-        if q:
-            df_con = data_dict.get('Contacts', pd.DataFrame())
-            if not df_con.empty:
-                res = df_con[df_con['First Name'].str.contains(q, case=False, na=False) | df_con['Phone'].str.contains(q, na=False)]
-                st.dataframe(res[['First Name', 'Last Name', 'Email', 'Phone', 'Type']])
+                    e_idx = df_ent.index[df_ent['ID'] == eid][0] + 2
+                    types = ["Individual", "LLC", "S-Corp", "C-Corp", "Partnership", "Non-Profit", "Trust", "Unknown"]
+                    nt = st.selectbox("Type", types, index=types.index(ent.get('Type', 'Individual') if ent.get('Type') in types else 'Unknown'))
+                    if st.button("Update"): update_cell("Entities", e_idx, 3, nt); st.rerun()
 
     # --- PRODUCTION ---
     elif nav == "✅ Production (Tasks)":
@@ -575,40 +528,57 @@ else:
                         if ns != r['Status']:
                             t_idx = df_tasks.index[df_tasks['Task_ID'] == r['Task_ID']][0] + 2
                             update_cell("Tasks", t_idx, 5, ns); st.rerun()
-                    with c2:
-                        # INSTRUCTIONS
-                        instr = st.text_area("Client Instructions (Checklist)", r.get('Client_Instructions', ''), key=f"ins_{r['Task_ID']}")
-                        if st.button("💾 Save Instructions", key=f"bins_{r['Task_ID']}"):
+                        
+                        st.write("---")
+                        # INTERNAL WORKFLOW
+                        i_wf = st.text_area("🔴 Internal Workflow (Private)", r.get('Internal_Workflow', ''), key=f"iw_{r['Task_ID']}")
+                        if st.button("Save Internal", key=f"biw_{r['Task_ID']}"):
                             t_idx = df_tasks.index[df_tasks['Task_ID'] == r['Task_ID']][0] + 2
-                            update_cell("Tasks", t_idx, 9, instr) # Col 9 is Instructions
-                            st.toast("Saved!")
+                            update_cell("Tasks", t_idx, 10, i_wf) # Col 10
+                            st.toast("Internal Saved")
                             
-                        link = f"{APP_BASE_URL}/?upload_token={r['Upload_Token']}"
-                        st.text_input("Upload Link", link, key=f"lk_{r['Task_ID']}")
+                    with c2:
+                        # EXTERNAL INSTRUCTIONS
+                        instr = st.text_area("🟢 Client Instructions (Public)", r.get('Client_Instructions', ''), key=f"ins_{r['Task_ID']}")
+                        if st.button("Save Client List", key=f"bins_{r['Task_ID']}"):
+                            t_idx = df_tasks.index[df_tasks['Task_ID'] == r['Task_ID']][0] + 2
+                            update_cell("Tasks", t_idx, 9, instr) # Col 9
+                            st.toast("Client List Saved")
+                        
+                        # SHOW CLIENT PROGRESS
+                        st.caption("Client Progress:")
+                        state_json = r.get('Client_Checklist_State', '')
+                        if state_json and "[" in state_json:
+                            try:
+                                checked = json.loads(state_json)
+                                st.success(f"Client checked {len(checked)} items: {', '.join(checked)}")
+                            except: st.write("No progress yet.")
+                        else: st.write("No progress yet.")
+                            
                     with c3:
+                        link = f"{APP_BASE_URL}/?upload_token={r['Upload_Token']}"
+                        st.text_input("Link", link, key=f"lk_{r['Task_ID']}")
+                        
                         tgt_em = None
                         if not df_rel.empty:
                             rels = df_rel[df_rel['Entity_ID'] == r['Entity_ID']]
                             for _, rel in rels.iterrows():
                                 con = df_con[df_con['ID'] == rel['Contact_ID']]
                                 if not con.empty and "@" in str(con.iloc[0].get('Email', '')):
-                                    tgt_em = con.iloc[0]['Email']
-                                    break
+                                    tgt_em = con.iloc[0]['Email']; break
                         if tgt_em:
                             if st.button(f"✉️ Send to {tgt_em}", key=f"em_{r['Task_ID']}"):
                                 subj = f"Action Required: {r['Service_Name']}"
-                                # HTML EMAIL WITH INSTRUCTIONS
-                                instr_html = f"<div style='background:#eee;padding:10px;'><b>Instructions:</b><br>{instr.replace(chr(10), '<br>')}</div>" if instr else ""
-                                body = f"<p>Please upload documents here:</p><p><a href='{link}'>{link}</a></p>{instr_html}"
+                                html_list = "".join([f"<li>{line}</li>" for line in instr.split('\n') if line.strip()])
+                                html_block = f"<ul>{html_list}</ul>" if html_list else ""
+                                body = f"<p>Please upload documents here:</p><p><a href='{link}'>{link}</a></p><p><b>Checklist:</b></p>{html_block}"
                                 if send_email_as_user(tgt_em, subj, body): st.toast("Sent!")
-                        else:
-                            st.warning("No contact email found.")
+                        else: st.warning("No email found.")
 
     # --- ADMIN ---
     elif nav == "🔒 Admin":
         st.title("Admin")
-        t1, t2, t3 = st.tabs(["Migration", "Services", "Automation"])
-        with t1: render_migration_tool(data_dict)
-        with t2: st.dataframe(data_dict.get('Services_Settings'))
-        with t3:
+        t1, t2 = st.tabs(["Services", "Automation"])
+        with t1: st.dataframe(data_dict.get('Services_Settings'))
+        with t2:
             if st.button("⚡ Force Automation"): run_daily_automation(data_dict, force=True)
