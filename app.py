@@ -35,13 +35,15 @@ st.markdown("""
 # ==========================================
 ADMIN_EMAIL = "ali@kohani.com"
 
-# PASTE YOUR FOLDER ID FROM THE BROWSER URL HERE 👇
-# Example: ROOT_DRIVE_FOLDER_ID = "1Hu7x9...etc"
+# 1. PASTE YOUR SHARED DRIVE FOLDER ID HERE 👇
+# (Open "00 Client Shared Files" in Drive -> Copy the ID after /folders/ in the URL)
 ROOT_DRIVE_FOLDER_ID = "0AF0LoD230jIaUk9PVA" 
 
-if not ROOT_DRIVE_FOLDER_ID:
-    st.error("⚠️ ACTION REQUIRED: Open 'streamlit_app.py' and paste the ID of '00 Client Shared Files' into line 38.")
-    st.stop()
+# 2. PASTE YOUR APP URL HERE 👇
+# (Copy from your browser address bar, e.g., "https://kohanicrm.streamlit.app")
+# NO trailing slash "/" at the end.
+APP_BASE_URL = "https://kohani-crm.streamlit.app/" 
+
 
 SCOPES_GMAIL = [
     'https://www.googleapis.com/auth/gmail.send',
@@ -123,6 +125,25 @@ def get_gmail_service():
     if "creds" not in st.session_state: return None
     return build('gmail', 'v1', credentials=st.session_state.creds)
 
+def send_email_as_user(to_email, subject, body_html):
+    try:
+        service = get_gmail_service()
+        message = MIMEMultipart('alternative')
+        sender = f"{st.session_state.user_name} <{st.session_state.user_email}>"
+        message['to'] = to_email
+        message['from'] = sender
+        if st.session_state.user_email.lower() != ADMIN_EMAIL.lower():
+            message['cc'] = ADMIN_EMAIL
+        message['subject'] = subject
+        part2 = MIMEText(body_html, 'html')
+        message.attach(part2)
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        service.users().messages().send(userId='me', body={'raw': raw}).execute()
+        return True
+    except Exception as e:
+        st.error(f"Gmail Error: {e}")
+        return False
+
 # ==========================================
 # 2. DATABASE CORE (CACHED)
 # ==========================================
@@ -167,22 +188,29 @@ def update_cell(sheet_name, row_idx, col_idx, value):
 # ==========================================
 def create_drive_folder(folder_name):
     """Creates folder INSIDE the Shared Drive Root."""
+    if not ROOT_DRIVE_FOLDER_ID:
+        st.error("ADMIN ERROR: ROOT_DRIVE_FOLDER_ID not set in code.")
+        return None
+        
     service = get_drive_service()
     
     file_metadata = {
         'name': folder_name,
         'mimeType': 'application/vnd.google-apps.folder',
-        'parents': [ROOT_DRIVE_FOLDER_ID]  # <--- Places it in "00 Client Shared Files"
+        'parents': [ROOT_DRIVE_FOLDER_ID]
     }
     
     # supportsAllDrives=True is REQUIRED for Shared Drives
-    file = service.files().create(
-        body=file_metadata, 
-        fields='id', 
-        supportsAllDrives=True
-    ).execute()
-    
-    return file.get('id')
+    try:
+        file = service.files().create(
+            body=file_metadata, 
+            fields='id', 
+            supportsAllDrives=True
+        ).execute()
+        return file.get('id')
+    except Exception as e:
+        st.error(f"Drive Error: {e}")
+        return None
 
 def upload_file_to_drive(uploaded_file, folder_id):
     try:
@@ -223,14 +251,14 @@ def render_public_upload_portal(token):
     st.info(f"Uploading for: **{entity['Name']}** ({service_name})")
     
     if not drive_id:
-        st.warning("Secure folder not set up."); return
+        st.warning("Secure folder not set up for this client."); return
 
     files = st.file_uploader("Select files", accept_multiple_files=True)
     if st.button("🚀 Upload", type="primary"):
         if files:
             with st.status("Uploading..."):
                 for f in files: upload_file_to_drive(f, drive_id)
-            st.balloons(); st.success("✅ Success!")
+            st.balloons(); st.success("✅ Success! You can close this page.")
 
 # ==========================================
 # 4. AUTOMATION
@@ -454,8 +482,9 @@ else:
                     if not did:
                         if st.button("📂 Create Shared Folder"):
                             fid = create_drive_folder(f"{ent['Name']} - {eid}")
-                            update_cell("Entities", e_idx, 7, fid)
-                            st.rerun()
+                            if fid:
+                                update_cell("Entities", e_idx, 7, fid)
+                                st.rerun()
                     else:
                         st.success(f"Connected: {did}")
                         st.markdown(f"[Open Drive Folder](https://drive.google.com/drive/u/0/folders/{did})")
@@ -490,6 +519,8 @@ else:
         st.title("Production Calendar")
         df_tasks = data_dict.get('Tasks', pd.DataFrame())
         df_ent = data_dict.get('Entities', pd.DataFrame())
+        df_rel = data_dict.get('Relationships', pd.DataFrame())
+        df_con = data_dict.get('Contacts', pd.DataFrame())
         
         if df_tasks.empty:
             st.info("No tasks.")
@@ -501,18 +532,32 @@ else:
             
             for _, r in view.iterrows():
                 with st.expander(f"📅 {r['Due_Date']} | {r['Name']} | {r['Service_Name']}"):
-                    c1, c2, c3 = st.columns(3)
+                    c1, c2, c3 = st.columns([1, 1, 2])
                     with c1:
                         ns = st.selectbox("Status", ["Not Started", "In Progress", "Done"], index=["Not Started", "In Progress", "Done"].index(r['Status']), key=f"s_{r['Task_ID']}")
                         if ns != r['Status']:
                             t_idx = df_tasks.index[df_tasks['Task_ID'] == r['Task_ID']][0] + 2
                             update_cell("Tasks", t_idx, 5, ns); st.rerun()
                     with c2:
-                        link = f"https://kohanicrm.streamlit.app/?upload_token={r['Upload_Token']}"
-                        st.text_input("Upload Link", link)
+                        link = f"{APP_BASE_URL}/?upload_token={r['Upload_Token']}"
+                        st.text_input("Upload Link", link, key=f"lk_{r['Task_ID']}")
                     with c3:
-                        body = f"Please upload documents here: {link}"
-                        st.markdown(f"[✉️ Email Client](mailto:?subject=Action%20Required&body={body})")
+                        # Find Email
+                        tgt_em = None
+                        if not df_rel.empty:
+                            rels = df_rel[df_rel['Entity_ID'] == r['Entity_ID']]
+                            for _, rel in rels.iterrows():
+                                con = df_con[df_con['ID'] == rel['Contact_ID']]
+                                if not con.empty and "@" in str(con.iloc[0].get('Email', '')):
+                                    tgt_em = con.iloc[0]['Email']
+                                    break
+                        if tgt_em:
+                            if st.button(f"✉️ Send to {tgt_em}", key=f"em_{r['Task_ID']}"):
+                                subj = f"Action Required: {r['Service_Name']}"
+                                body = f"<p>Please upload documents here:</p><p><a href='{link}'>{link}</a></p>"
+                                if send_email_as_user(tgt_em, subj, body): st.toast("Sent!")
+                        else:
+                            st.warning("No contact email found.")
 
     # --- ADMIN ---
     elif nav == "🔒 Admin":
