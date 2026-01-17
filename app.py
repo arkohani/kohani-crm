@@ -28,8 +28,10 @@ st.markdown("""
     #MainMenu {display: none;}
     header {visibility: hidden;}
     .stDataFrame { border: 1px solid #ddd; border-radius: 5px; }
-    .internal-box { border-left: 5px solid #ff4b4b; background-color: #fff1f0; padding: 10px; border-radius: 5px; }
-    .client-box { border-left: 5px solid #28a745; background-color: #f0fff4; padding: 10px; border-radius: 5px; }
+    .status-badge-linked { background-color: #d4edda; color: #155724; padding: 5px 10px; border-radius: 5px; font-weight: bold; border: 1px solid #c3e6cb; }
+    .status-badge-missing { background-color: #f8d7da; color: #721c24; padding: 5px 10px; border-radius: 5px; font-weight: bold; border: 1px solid #f5c6cb; }
+    .task-card { background-color: #ffffff; padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #e0e0e0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .comment-log { background-color: #f8f9fa; padding: 10px; border-radius: 5px; font-size: 0.9em; max-height: 150px; overflow-y: auto; margin-top: 10px; border: 1px solid #eee;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -141,7 +143,7 @@ def send_email_as_user(to_email, subject, body_html):
         return False
 
 # ==========================================
-# 2. DATABASE CORE (CACHED)
+# 2. DATABASE CORE
 # ==========================================
 @st.cache_data(ttl=60) 
 def get_all_data():
@@ -210,7 +212,6 @@ def upload_file_to_drive(uploaded_file, folder_id):
     except: return False
 
 def render_public_upload_portal(token):
-    # --- CLIENT VIEW ---
     st.markdown("## 📤 Client Portal")
     data = get_all_data()
     df_tasks = data.get('Tasks', pd.DataFrame())
@@ -227,39 +228,27 @@ def render_public_upload_portal(token):
     
     st.info(f"Task: **{service_name}**")
     
-    # --- CHECKLIST LOGIC ---
     instr = task_row.get('Client_Instructions', '')
     saved_state_str = task_row.get('Client_Checklist_State', '')
-    
-    # Parse existing state
     checked_items = []
     if saved_state_str:
         try: checked_items = json.loads(saved_state_str)
         except: checked_items = []
         
     new_checked_items = []
-    
     if instr:
         st.write("### 📋 Your Checklist")
         st.caption("Check items as you complete them and click 'Save Progress'.")
         lines = [x.strip() for x in instr.split('\n') if x.strip()]
-        
         for line in lines:
-            # Check if this line was previously checked
             is_checked = line in checked_items
             if st.checkbox(line, value=is_checked, key=f"chk_{line[:15]}"):
                 new_checked_items.append(line)
-        
         if st.button("💾 Save Checklist Progress"):
             t_idx = df_tasks.index[df_tasks['Upload_Token'] == token][0] + 2
-            # Save to Column 11 (K)
-            json_dump = json.dumps(new_checked_items)
-            update_cell("Tasks", t_idx, 11, json_dump)
-            st.toast("Progress Saved!")
-            time.sleep(1)
-            st.rerun()
+            update_cell("Tasks", t_idx, 11, json.dumps(new_checked_items))
+            st.toast("Progress Saved!"); time.sleep(1); st.rerun()
 
-    # --- UPLOAD LOGIC ---
     df_ent = data.get('Entities')
     entity = df_ent[df_ent['ID'] == entity_id].iloc[0]
     drive_id = entity.get('Drive_Folder_ID')
@@ -291,9 +280,7 @@ def generate_id(prefix): return f"{prefix}-{str(uuid.uuid4())[:8]}"
 def run_daily_automation(data, force=False):
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     df_logs = data.get('App_Logs', pd.DataFrame())
-    
-    if not force and not df_logs.empty:
-        if df_logs['Timestamp'].str.contains(today).any(): return 
+    if not force and not df_logs.empty and df_logs['Timestamp'].str.contains(today).any(): return 
             
     df_services = data.get('Services_Settings', pd.DataFrame())
     df_assigned = data.get('Services_Assigned', pd.DataFrame())
@@ -309,7 +296,6 @@ def run_daily_automation(data, force=False):
                 due_day = int(rule.iloc[0].get('Due_Rule_Days', 15))
                 now = datetime.datetime.now()
                 due_str = ""
-
                 if freq == "Monthly":
                     nm = now.month + 1 if now.month < 12 else 1
                     ny = now.year if now.month < 12 else now.year + 1
@@ -322,15 +308,14 @@ def run_daily_automation(data, force=False):
                     due_str = deadline.strftime("%Y-%m-%d") if now < deadline else f"{now.year+1}-{tm:02d}-{due_day:02d}"
                 elif freq == "One-Time":
                     due_str = (now + datetime.timedelta(days=15)).strftime("%Y-%m-%d")
-
                 if due_str:
                     dup = False
                     if not df_tasks.empty:
                         mask = (df_tasks['Entity_ID'] == e_id) & (df_tasks['Service_Name'] == s_name) & (df_tasks['Due_Date'] == due_str)
                         if not df_tasks[mask].empty: dup = True
                     if not dup:
-                        # Append blank cols for Client_Instruct, Internal_Workflow, Client_Check_State
-                        new_tasks.append([generate_id("T"), e_id, s_name, due_str, "Not Started", str(uuid.uuid4()), "", "", "", "", ""])
+                        # Append 12 columns (ID, Entity, Service, Due, Status, Token, Notified, Docs, ClientInstr, InternalFlow, ClientState, Comments)
+                        new_tasks.append([generate_id("T"), e_id, s_name, due_str, "Not Started", str(uuid.uuid4()), "", "", "", "", "", ""])
     
     if new_tasks:
         for t in new_tasks: append_to_sheet("Tasks", t)
@@ -393,7 +378,6 @@ else:
         df_ent = data_dict.get('Entities', pd.DataFrame())
         c1, c2, c3 = st.columns(3)
         c1.metric("Active Entities", len(df_ent) if not df_ent.empty else 0)
-        
         pending = 0
         if not df_tasks.empty and 'Status' in df_tasks.columns:
             pending = len(df_tasks[df_tasks['Status'] != 'Done'])
@@ -407,46 +391,9 @@ else:
                 df_full = done.merge(df_ent[['ID', 'Name']], left_on='Entity_ID', right_on='ID', how='left')
                 st.dataframe(df_full[['Name', 'Service_Name', 'Due_Date']], use_container_width=True)
 
-    # --- CALL QUEUE ---
-    elif nav == "📞 Call Queue":
-        st.title("📞 Call Queue")
-        df_con = data_dict.get('Contacts', pd.DataFrame())
-        if df_con.empty: st.warning("No contacts."); st.stop()
-        
-        if st.session_state.get('call_id') is None:
-            c1, c2 = st.columns(2)
-            with c1:
-                queue = df_con[df_con['Status'].isin(['New', 'Follow Up'])] if 'Status' in df_con.columns else pd.DataFrame()
-                st.write(f"**{len(queue)}** in queue")
-                if st.button("🎲 START CALL"):
-                    if not queue.empty: st.session_state.call_id = queue.sample(1).iloc[0]['ID']; st.rerun()
-            with c2:
-                q = st.text_input("Search Contact")
-                if q:
-                    res = df_con[df_con['First Name'].str.contains(q, case=False, na=False)]
-                    for _, r in res.iterrows():
-                        if st.button(f"Load: {r['First Name']} {r['Last Name']}", key=r['ID']):
-                            st.session_state.call_id = r['ID']; st.rerun()
-        else:
-            cid = st.session_state.call_id
-            row = df_con[df_con['ID'] == cid].iloc[0]
-            idx = df_con.index[df_con['ID'] == cid][0] + 2
-            with st.container(border=True):
-                st.subheader(f"{row['First Name']} {row['Last Name']}")
-                if st.button("Exit"): st.session_state.call_id = None; st.rerun()
-                c1, c2 = st.columns(2)
-                ph = c1.text_input("Phone", row.get('Phone'))
-                em = c2.text_input("Email", row.get('Email'))
-                st.text_area("History", row.get('Notes', ''), disabled=True, height=100)
-                note = st.text_area("New Note")
-                if st.button("Save"):
-                    update_cell("Contacts", idx, 5, ph); update_cell("Contacts", idx, 4, em)
-                    if note: update_cell("Contacts", idx, 7, f"{row.get('Notes','')}\n[{datetime.datetime.now()}] {note}")
-                    st.session_state.call_id = None; st.rerun()
-
-    # --- ENTITIES ---
+    # --- ENTITIES (COMMAND CENTER) ---
     elif nav == "🏢 Entities":
-        st.title("Entity Manager")
+        st.title("Entity Command Center")
         df_ent = data_dict.get('Entities')
         df_tasks = data_dict.get('Tasks', pd.DataFrame())
         df_rel = data_dict.get('Relationships')
@@ -472,18 +419,95 @@ else:
             elif st.session_state.get('ent_id'):
                 eid = st.session_state.ent_id
                 ent = df_ent[df_ent['ID'] == eid].iloc[0]
-                st.header(ent['Name'])
                 
-                t1, t2, t3 = st.tabs(["Tasks & Docs", "People", "Settings"])
-                with t1:
+                # --- COMMAND CENTER HEADER ---
+                hc1, hc2 = st.columns([3, 1])
+                with hc1:
+                    st.header(ent['Name'])
+                    st.caption(f"ID: {eid} | Type: {ent.get('Type','Unknown')} | FEIN: {ent.get('FEIN','N/A')}")
+                with hc2:
+                    did = ent.get('Drive_Folder_ID')
+                    if did and len(str(did)) > 5:
+                        st.markdown(f"""<div class="status-badge-linked">✅ Drive Linked</div><br><a href="https://drive.google.com/drive/u/0/folders/{did}" target="_blank">📂 Open Folder</a>""", unsafe_allow_html=True)
+                        if st.checkbox("Unlink"):
+                             if st.button("❌ Remove Link"): 
+                                e_idx = df_ent.index[df_ent['ID'] == eid][0] + 2
+                                update_cell("Entities", e_idx, 7, ""); st.rerun()
+                    else:
+                        st.markdown("""<div class="status-badge-missing">❌ No Drive</div>""", unsafe_allow_html=True)
+                        if st.button("📂 Create Folder"):
+                            e_idx = df_ent.index[df_ent['ID'] == eid][0] + 2
+                            fid = create_drive_folder(ent['Name'])
+                            if fid: update_cell("Entities", e_idx, 7, fid); st.rerun()
+
+                # --- TABS ---
+                t_tasks, t_people, t_settings = st.tabs(["Active Jobs (PM)", "People & Contacts", "Settings"])
+                
+                # TAB 1: ACTIVE JOBS (PM)
+                with t_tasks:
+                    # Manual Task Button
+                    with st.expander("➕ Add Manual Job"):
+                        m_serv = st.text_input("Job/Task Name (e.g., IRS Notice)")
+                        m_due = st.date_input("Due Date")
+                        if st.button("Add Job"):
+                            append_to_sheet("Tasks", [generate_id("T"), eid, m_serv, str(m_due), "Not Started", str(uuid.uuid4()), "", "", "", "", "", ""])
+                            st.success("Added!"); time.sleep(1); st.rerun()
+
+                    # Task List
                     if not df_tasks.empty:
                         my_tasks = df_tasks[df_tasks['Entity_ID'] == eid]
                         if not my_tasks.empty:
                             for _, t in my_tasks.iterrows():
-                                color_cls = "task-pending" if t['Status'] != "Done" else ""
-                                st.markdown(f"<div class='task-card {color_cls}'><b>{t['Service_Name']}</b> | Status: {t['Status']}</div>", unsafe_allow_html=True)
+                                with st.expander(f"{t['Service_Name']} | Due: {t['Due_Date']} | {t['Status']}"):
+                                    c_pm1, c_pm2 = st.columns(2)
+                                    
+                                    # Left: Status & Workflow
+                                    with c_pm1:
+                                        t_idx = df_tasks.index[df_tasks['Task_ID'] == t['Task_ID']][0] + 2
+                                        ns = st.selectbox("Status", ["Not Started", "In Progress", "Done"], index=["Not Started", "In Progress", "Done"].index(t['Status']), key=f"ts_{t['Task_ID']}")
+                                        if ns != t['Status']: update_cell("Tasks", t_idx, 5, ns); st.rerun()
+                                        
+                                        # Link
+                                        link = f"{APP_BASE_URL}/?upload_token={t['Upload_Token']}"
+                                        st.text_input("Client Link", link, key=f"ln_{t['Task_ID']}")
+                                        
+                                        # Internal Comments (PM)
+                                        st.write("**📝 Project Notes / Chat**")
+                                        prev_comments = t.get('Internal_Comments', '')
+                                        if prev_comments:
+                                            st.markdown(f'<div class="comment-log">{prev_comments.replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
+                                        
+                                        new_comm = st.text_input("Add comment...", key=f"nc_{t['Task_ID']}")
+                                        if st.button("Post", key=f"bp_{t['Task_ID']}"):
+                                            ts = datetime.datetime.now().strftime("%m/%d %H:%M")
+                                            append = f"<b>[{ts} {st.session_state.user_name}]</b>: {new_comm}"
+                                            final = f"{prev_comments}\n{append}" if prev_comments else append
+                                            update_cell("Tasks", t_idx, 12, final) # Col 12
+                                            st.rerun()
+
+                                    # Right: Checklist
+                                    with c_pm2:
+                                        st.write("**🟢 Client Checklist**")
+                                        instr = st.text_area("Edit Items", t.get('Client_Instructions', ''), height=100, key=f"ti_{t['Task_ID']}")
+                                        if st.button("Save List", key=f"bs_{t['Task_ID']}"):
+                                            update_cell("Tasks", t_idx, 9, instr)
+                                            st.toast("Saved")
+                                        
+                                        # Client Progress
+                                        c_state = t.get('Client_Checklist_State', '')
+                                        if c_state and "[" in c_state:
+                                            try: 
+                                                done_list = json.loads(c_state)
+                                                st.progress(len(done_list)/max(1, len(instr.split('\n'))))
+                                                st.caption(f"Client finished: {', '.join(done_list)}")
+                                            except: pass
+                                        else: st.caption("Client has not started.")
+
                         else: st.info("No active tasks.")
-                with t2:
+                    else: st.info("No tasks in system.")
+
+                # TAB 2: PEOPLE
+                with t_people:
                     if not df_rel.empty:
                         for _, r in df_rel[df_rel['Entity_ID'] == eid].iterrows():
                             c = df_con[df_con['ID'] == r['Contact_ID']]
@@ -498,19 +522,54 @@ else:
                             if st.button("Link"):
                                 append_to_sheet("Relationships", [eid, sel_p.split("(ID: ")[1][:-1], role, ""])
                                 st.success("Linked!"); st.rerun()
-                with t3:
+
+                # TAB 3: SETTINGS
+                with t_settings:
                     e_idx = df_ent.index[df_ent['ID'] == eid][0] + 2
                     types = ["Individual", "LLC", "S-Corp", "C-Corp", "Partnership", "Non-Profit", "Trust", "Unknown"]
                     nt = st.selectbox("Type", types, index=types.index(ent.get('Type', 'Individual') if ent.get('Type') in types else 'Unknown'))
                     if st.button("Update"): update_cell("Entities", e_idx, 3, nt); st.rerun()
+
+    # --- CALL QUEUE & CRM ---
+    elif nav == "📞 Call Queue":
+        st.title("📞 Call Queue")
+        df_con = data_dict.get('Contacts', pd.DataFrame())
+        if df_con.empty: st.warning("No contacts."); st.stop()
+        if st.session_state.get('call_id') is None:
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("🎲 START CALL"): st.session_state.call_id = df_con.sample(1).iloc[0]['ID']; st.rerun()
+            with c2:
+                q = st.text_input("Search Contact")
+                if q:
+                    res = df_con[df_con['First Name'].str.contains(q, case=False, na=False)]
+                    for _, r in res.iterrows():
+                        if st.button(f"Load: {r['First Name']}", key=r['ID']): st.session_state.call_id = r['ID']; st.rerun()
+        else:
+            cid = st.session_state.call_id; row = df_con[df_con['ID'] == cid].iloc[0]; idx = df_con.index[df_con['ID'] == cid][0] + 2
+            with st.container(border=True):
+                st.subheader(f"{row['First Name']} {row['Last Name']}")
+                if st.button("Exit"): st.session_state.call_id = None; st.rerun()
+                note = st.text_area("New Note")
+                if st.button("Save"):
+                    if note: update_cell("Contacts", idx, 7, f"{row.get('Notes','')}\n[{datetime.datetime.now()}] {note}")
+                    st.session_state.call_id = None; st.rerun()
+
+    # --- CONTACTS ---
+    elif nav == "👥 Contacts":
+        st.title("Contacts Directory")
+        q = st.text_input("Search")
+        if q:
+            df_con = data_dict.get('Contacts', pd.DataFrame())
+            if not df_con.empty:
+                res = df_con[df_con['First Name'].str.contains(q, case=False, na=False)]
+                st.dataframe(res)
 
     # --- PRODUCTION ---
     elif nav == "✅ Production (Tasks)":
         st.title("Production Calendar")
         df_tasks = data_dict.get('Tasks', pd.DataFrame())
         df_ent = data_dict.get('Entities', pd.DataFrame())
-        df_rel = data_dict.get('Relationships', pd.DataFrame())
-        df_con = data_dict.get('Contacts', pd.DataFrame())
         
         if df_tasks.empty:
             st.info("No tasks.")
@@ -522,58 +581,12 @@ else:
             
             for _, r in view.iterrows():
                 with st.expander(f"📅 {r['Due_Date']} | {r['Name']} | {r['Service_Name']}"):
-                    c1, c2, c3 = st.columns([1, 1, 2])
-                    with c1:
-                        ns = st.selectbox("Status", ["Not Started", "In Progress", "Done"], index=["Not Started", "In Progress", "Done"].index(r['Status']), key=f"s_{r['Task_ID']}")
-                        if ns != r['Status']:
-                            t_idx = df_tasks.index[df_tasks['Task_ID'] == r['Task_ID']][0] + 2
-                            update_cell("Tasks", t_idx, 5, ns); st.rerun()
-                        
-                        st.write("---")
-                        # INTERNAL WORKFLOW
-                        i_wf = st.text_area("🔴 Internal Workflow (Private)", r.get('Internal_Workflow', ''), key=f"iw_{r['Task_ID']}")
-                        if st.button("Save Internal", key=f"biw_{r['Task_ID']}"):
-                            t_idx = df_tasks.index[df_tasks['Task_ID'] == r['Task_ID']][0] + 2
-                            update_cell("Tasks", t_idx, 10, i_wf) # Col 10
-                            st.toast("Internal Saved")
-                            
-                    with c2:
-                        # EXTERNAL INSTRUCTIONS
-                        instr = st.text_area("🟢 Client Instructions (Public)", r.get('Client_Instructions', ''), key=f"ins_{r['Task_ID']}")
-                        if st.button("Save Client List", key=f"bins_{r['Task_ID']}"):
-                            t_idx = df_tasks.index[df_tasks['Task_ID'] == r['Task_ID']][0] + 2
-                            update_cell("Tasks", t_idx, 9, instr) # Col 9
-                            st.toast("Client List Saved")
-                        
-                        # SHOW CLIENT PROGRESS
-                        st.caption("Client Progress:")
-                        state_json = r.get('Client_Checklist_State', '')
-                        if state_json and "[" in state_json:
-                            try:
-                                checked = json.loads(state_json)
-                                st.success(f"Client checked {len(checked)} items: {', '.join(checked)}")
-                            except: st.write("No progress yet.")
-                        else: st.write("No progress yet.")
-                            
-                    with c3:
-                        link = f"{APP_BASE_URL}/?upload_token={r['Upload_Token']}"
-                        st.text_input("Link", link, key=f"lk_{r['Task_ID']}")
-                        
-                        tgt_em = None
-                        if not df_rel.empty:
-                            rels = df_rel[df_rel['Entity_ID'] == r['Entity_ID']]
-                            for _, rel in rels.iterrows():
-                                con = df_con[df_con['ID'] == rel['Contact_ID']]
-                                if not con.empty and "@" in str(con.iloc[0].get('Email', '')):
-                                    tgt_em = con.iloc[0]['Email']; break
-                        if tgt_em:
-                            if st.button(f"✉️ Send to {tgt_em}", key=f"em_{r['Task_ID']}"):
-                                subj = f"Action Required: {r['Service_Name']}"
-                                html_list = "".join([f"<li>{line}</li>" for line in instr.split('\n') if line.strip()])
-                                html_block = f"<ul>{html_list}</ul>" if html_list else ""
-                                body = f"<p>Please upload documents here:</p><p><a href='{link}'>{link}</a></p><p><b>Checklist:</b></p>{html_block}"
-                                if send_email_as_user(tgt_em, subj, body): st.toast("Sent!")
-                        else: st.warning("No email found.")
+                    st.write("**Project Notes:**")
+                    if r.get('Internal_Comments'): st.info(r['Internal_Comments'])
+                    if st.button("Go to Entity Dashboard", key=f"g_{r['Task_ID']}"):
+                        st.session_state.ent_id = r['Entity_ID']
+                        # Set nav manually? Streamlit restriction. Best is to inform user.
+                        st.info("Click '🏢 Entities' in sidebar to manage.")
 
     # --- ADMIN ---
     elif nav == "🔒 Admin":
