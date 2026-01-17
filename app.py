@@ -329,7 +329,6 @@ def render_migration_tool(data):
     st.warning("This tool moves data from 'Clients' to the new 'Entities' and 'Contacts' tabs.")
     
     df_old = data.get('Clients')
-    df_ent = data.get('Entities')
     
     if df_old.empty:
         st.info("No legacy data found.")
@@ -337,7 +336,7 @@ def render_migration_tool(data):
 
     st.write(f"Found {len(df_old)} rows in Legacy Clients.")
     
-    if st.button("🚀 RUN MIGRATION (Safe Append)"):
+    if st.button("🚀 RUN MIGRATION (With Call History)"):
         progress = st.progress(0)
         count = 0
         for i, row in df_old.iterrows():
@@ -347,25 +346,53 @@ def render_migration_tool(data):
             # Save Entity
             append_to_sheet("Entities", [ent_id, ent_name, "Unknown", "", "", "", ""])
             
-            # 2. Create Taxpayer Contact
+            # Capture CRM Status
+            status = row.get('Status', 'New')
+            outcome = row.get('Outcome', '')
+            last_agent = row.get('Last_Agent', '')
+            last_updated = row.get('Last_Updated', '')
+            
+            # 2. Create Taxpayer Contact (Primary)
             tp_first = row.get('Taxpayer First Name')
             tp_email = row.get('Taxpayer E-mail Address')
-            if tp_first:
+            if tp_first or ent_name: # Ensure we create a contact even if just company name
                 c_id = generate_id("C")
-                append_to_sheet("Contacts", [c_id, tp_first, row.get('Taxpayer last name', ''), tp_email, row.get('Home Telephone', ''), "Taxpayer", ""])
+                # Add Status columns to Contact
+                append_to_sheet("Contacts", [
+                    c_id, 
+                    tp_first if tp_first else ent_name, 
+                    row.get('Taxpayer last name', ''), 
+                    tp_email, 
+                    row.get('Home Telephone', ''), 
+                    "Taxpayer", 
+                    "", # Notes (initial blank)
+                    status, 
+                    outcome, 
+                    last_agent, 
+                    last_updated
+                ])
                 append_to_sheet("Relationships", [ent_id, c_id, "Owner", "100%"])
             
-            # 3. Create Spouse Contact
+            # 3. Create Spouse Contact (Secondary - usually Reset status or Same?)
             sp_first = row.get('Spouse First Name')
             if sp_first:
                 c_id_sp = generate_id("C")
-                append_to_sheet("Contacts", [c_id_sp, sp_first, row.get('Spouse last name', ''), row.get('Spouse E-mail Address', ''), "", "Spouse", ""])
+                append_to_sheet("Contacts", [
+                    c_id_sp, 
+                    sp_first, 
+                    row.get('Spouse last name', ''), 
+                    row.get('Spouse E-mail Address', ''), 
+                    "", 
+                    "Spouse", 
+                    "",
+                    "New", "", "", "" # Spouse starts fresh or linked? Keeping fresh for now.
+                ])
                 append_to_sheet("Relationships", [ent_id, c_id_sp, "Spouse", ""])
             
             count += 1
             progress.progress(count / len(df_old))
             
-        st.success("Migration Complete! Please check the new tabs.")
+        st.success("Migration Complete! CRM History Preserved.")
         st.rerun()
 
 # ==========================================
@@ -422,7 +449,7 @@ else:
     with st.sidebar:
         st.write(f"👤 **{st.session_state.user_name}**")
         st.markdown("---")
-        nav = st.radio("Navigation", ["📊 Dashboard", "🏢 Entities", "👥 Contacts", "✅ Production (Tasks)", "🔒 Admin"])
+        nav = st.radio("Navigation", ["📊 Dashboard", "📞 Call Queue", "🏢 Entities", "👥 Contacts", "✅ Production (Tasks)", "🔒 Admin"])
         st.markdown("---")
         if st.button("Logout"):
             del st.session_state.creds
@@ -433,6 +460,107 @@ else:
         st.title("Practice Dashboard")
         df_tasks = data_dict.get('Tasks', pd.DataFrame())
         df_ent = data_dict.get('Entities', pd.DataFrame())
+
+    # --- CALL QUEUE (RESTORED) ---
+    elif nav == "📞 Call Queue":
+        st.title("📞 Call Queue & CRM")
+        df_con = data_dict.get('Contacts')
+        
+        # Gamification / Stats
+        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        if 'Last_Updated' in df_con.columns:
+            daily = df_con[df_con['Last_Updated'].str.contains(today_str, na=False)]
+            my_calls = len(daily[daily['Last_Agent'] == st.session_state.user_email])
+            st.metric("🔥 My Calls Today", my_calls)
+        
+        # Logic
+        if "call_session_id" not in st.session_state: st.session_state.call_session_id = None
+        
+        if st.session_state.call_session_id is None:
+            # LOBBY VIEW
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                st.subheader("Action Required")
+                # Filter for New or Follow Up
+                queue = df_con[df_con['Status'].isin(['New', 'Follow Up', 'Left Message'])]
+                st.write(f"**{len(queue)}** contacts in queue.")
+                
+                if st.button("🎲 START NEXT CALL", type="primary", use_container_width=True):
+                    if not queue.empty:
+                        # Prioritize leads with phone numbers
+                        has_phone = queue[queue['Phone'].str.len() > 5]
+                        if not has_phone.empty:
+                            selected = has_phone.sample(1).iloc[0]
+                        else:
+                            selected = queue.sample(1).iloc[0]
+                        st.session_state.call_session_id = selected['ID']
+                        st.rerun()
+                    else:
+                        st.success("Queue cleared! 🎉")
+            
+            with c2:
+                st.subheader("Manual Search")
+                search_q = st.text_input("Search Contact Name/Phone")
+                if search_q:
+                    res = df_con[df_con['First Name'].astype(str).str.contains(search_q, case=False) | 
+                                 df_con['Phone'].astype(str).str.contains(search_q)]
+                    if not res.empty:
+                        for _, r in res.iterrows():
+                            if st.button(f"Load: {r['First Name']} {r['Last Name']}", key=f"btn_{r['ID']}"):
+                                st.session_state.call_session_id = r['ID']
+                                st.rerun()
+
+        else:
+            # CARD VIEW
+            cid = st.session_state.call_session_id
+            contact = df_con[df_con['ID'] == cid].iloc[0]
+            
+            with st.container(border=True):
+                c_head, c_btn = st.columns([3, 1])
+                c_head.title(f"{contact['First Name']} {contact['Last Name']}")
+                if c_btn.button("❌ Exit Call"):
+                    st.session_state.call_session_id = None
+                    st.rerun()
+                
+                c1, c2 = st.columns(2)
+                new_phone = c1.text_input("Phone", contact['Phone'])
+                new_email = c2.text_input("Email", contact['Email'])
+                
+                st.info(f"Current Status: **{contact.get('Status', 'New')}**")
+                
+                # Notes Section
+                notes_hist = str(contact.get('Notes', ''))
+                st.text_area("History", notes_hist, height=150, disabled=True)
+                new_note = st.text_area("New Note / Call Log")
+                
+                # Disposition
+                col_res1, col_res2 = st.columns(2)
+                res_status = col_res1.selectbox("New Status", ["New", "Left Message", "Talked", "Wrong Number", "Not Interested", "Sold/Won"])
+                res_outcome = col_res2.selectbox("Outcome", ["Pending", "Yes", "No", "Maybe"])
+                
+                if st.button("💾 SAVE & FINISH", type="primary", use_container_width=True):
+                    # Find Row Index
+                    idx = df_con.index[df_con['ID'] == cid][0] + 2 # +2 for header and 1-based
+                    
+                    # Update Cells (Example columns - adjust indexes if your sheet varies)
+                    # Assuming: 5=Phone, 4=Email, 7=Notes, 8=Status, 9=Outcome, 10=Agent, 11=Time
+                    update_cell("Contacts", idx, 5, new_phone)
+                    update_cell("Contacts", idx, 4, new_email)
+                    update_cell("Contacts", idx, 8, res_status)
+                    update_cell("Contacts", idx, 9, res_outcome)
+                    update_cell("Contacts", idx, 10, st.session_state.user_email)
+                    update_cell("Contacts", idx, 11, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+                    
+                    if new_note:
+                        ts = datetime.datetime.now().strftime("%Y-%m-%d")
+                        append_note = f"\n[{ts} {st.session_state.user_name}]: {new_note}"
+                        final_note = notes_hist + append_note
+                        update_cell("Contacts", idx, 7, final_note)
+                        
+                    st.success("Saved!")
+                    time.sleep(1)
+                    st.session_state.call_session_id = None
+                    st.rerun()
         
         c1, c2, c3 = st.columns(3)
         c1.metric("Active Entities", len(df_ent))
