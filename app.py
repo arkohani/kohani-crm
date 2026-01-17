@@ -27,6 +27,7 @@ st.markdown("""
     #MainMenu {display: none;}
     header {visibility: hidden;}
     .stDataFrame { border: 1px solid #ddd; border-radius: 5px; }
+    .instruction-box { background-color: #f0f2f6; padding: 15px; border-radius: 8px; border-left: 5px solid #ff4b4b; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -197,7 +198,6 @@ def create_drive_folder(folder_name):
         'parents': [ROOT_DRIVE_FOLDER_ID]
     }
     
-    # supportsAllDrives=True is REQUIRED for Shared Drives
     try:
         file = service.files().create(
             body=file_metadata, 
@@ -215,7 +215,6 @@ def upload_file_to_drive(uploaded_file, folder_id):
         file_metadata = {'name': uploaded_file.name, 'parents': [folder_id]}
         fh = io.BytesIO(uploaded_file.getvalue())
         media = MediaIoBaseUpload(fh, mimetype=uploaded_file.type, resumable=True)
-        # Uploading to Shared Drive also requires supportsAllDrives=True
         service.files().create(
             body=file_metadata, 
             media_body=media, 
@@ -226,7 +225,8 @@ def upload_file_to_drive(uploaded_file, folder_id):
     except: return False
 
 def render_public_upload_portal(token):
-    st.markdown("## 📤 Secure Document Upload")
+    # CLIENT VIEW: DOCUMENT UPLOAD & INSTRUCTIONS
+    st.markdown("## 📤 Client Portal")
     data = get_all_data()
     df_tasks = data.get('Tasks', pd.DataFrame())
     
@@ -235,27 +235,50 @@ def render_public_upload_portal(token):
 
     task = df_tasks[df_tasks['Upload_Token'] == token]
     if task.empty:
-        st.error("⚠️ Invalid link."); return
+        st.error("⚠️ Invalid or expired link."); return
         
     task_row = task.iloc[0]
     entity_id = task_row['Entity_ID']
     service_name = task_row['Service_Name']
     
+    # 1. Show Instructions (Checklist)
+    st.markdown("### 📋 Instructions")
+    instructions = task_row.get('Client_Instructions', '')
+    if instructions:
+        st.markdown(f'<div class="instruction-box">{instructions.replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
+    else:
+        st.info(f"Please upload documents for: **{service_name}**")
+
+    # 2. Upload Section
     df_ent = data.get('Entities')
     entity = df_ent[df_ent['ID'] == entity_id].iloc[0]
     drive_id = entity.get('Drive_Folder_ID')
     
-    st.info(f"Uploading for: **{entity['Name']}** ({service_name})")
-    
     if not drive_id:
-        st.warning("Secure folder not set up for this client."); return
+        st.warning("Secure folder not set up for this client. Please contact us."); return
 
+    st.write("---")
+    st.write(f"**Upload files for: {entity['Name']}**")
     files = st.file_uploader("Select files", accept_multiple_files=True)
-    if st.button("🚀 Upload", type="primary"):
+    if st.button("🚀 Upload Files", type="primary"):
         if files:
-            with st.status("Uploading..."):
+            with st.status("Uploading securely..."):
                 for f in files: upload_file_to_drive(f, drive_id)
-            st.balloons(); st.success("✅ Success! You can close this page.")
+            st.balloons(); st.success("✅ Files uploaded successfully!")
+    
+    st.write("---")
+    # 3. Mark Complete Button
+    if task_row['Status'] != 'Done':
+        if st.button("✅ I have finished uploading everything"):
+            # Update Task Status to 'Done'
+            # Find row index
+            t_idx = df_tasks.index[df_tasks['Upload_Token'] == token][0] + 2
+            update_cell("Tasks", t_idx, 5, "Done") # Col 5 is Status
+            st.success("Thank you! We have been notified.")
+            time.sleep(2)
+            st.rerun()
+    else:
+        st.success("✅ This task is marked as Complete.")
 
 # ==========================================
 # 4. AUTOMATION
@@ -303,7 +326,8 @@ def run_daily_automation(data, force=False):
                         mask = (df_tasks['Entity_ID'] == e_id) & (df_tasks['Service_Name'] == s_name) & (df_tasks['Due_Date'] == due_str)
                         if not df_tasks[mask].empty: dup = True
                     if not dup:
-                        new_tasks.append([generate_id("T"), e_id, s_name, due_str, "Not Started", str(uuid.uuid4()), "", ""])
+                        # Add blank for Client Instructions (Col 9)
+                        new_tasks.append([generate_id("T"), e_id, s_name, due_str, "Not Started", str(uuid.uuid4()), "", "", ""])
     
     if new_tasks:
         for t in new_tasks: append_to_sheet("Tasks", t)
@@ -470,7 +494,6 @@ else:
                 with t1:
                     e_idx = df_ent.index[df_ent['ID'] == eid][0] + 2
                     
-                    # --- TYPE FIX & SAFETY ---
                     types = ["Individual", "LLC", "S-Corp", "C-Corp", "Partnership", "Non-Profit", "Trust", "Unknown"]
                     curr_type = ent.get('Type', 'Individual')
                     if curr_type not in types: curr_type = "Unknown"
@@ -482,17 +505,23 @@ else:
                         update_cell("Entities", e_idx, 4, nf)
                         st.rerun()
                     
-                    # --- DRIVE LOGIC (WITH RESET) ---
+                    # DRIVE LOGIC
                     did = ent.get('Drive_Folder_ID')
                     if did and len(str(did)) > 5:
                         st.success(f"Connected: {did}")
                         st.markdown(f"[Open Drive Folder](https://drive.google.com/drive/u/0/folders/{did})")
-                        if st.button("❌ Unlink/Reset Folder"):
-                            update_cell("Entities", e_idx, 7, "")
-                            st.rerun()
+                        
+                        # SAFETY UNLINK
+                        with st.expander("⚠️ Advanced / Reset"):
+                            st.warning("Only reset if you deleted the folder in Drive manually.")
+                            if st.checkbox("I understand this breaks the link"):
+                                if st.button("❌ Unlink/Reset Folder"):
+                                    update_cell("Entities", e_idx, 7, "")
+                                    st.rerun()
                     else:
                         if st.button("📂 Create Shared Folder"):
-                            fid = create_drive_folder(f"{ent['Name']} - {eid}")
+                            # NAME CLEANUP: Just use Name, no ID
+                            fid = create_drive_folder(ent['Name'])
                             if fid:
                                 update_cell("Entities", e_idx, 7, fid)
                                 st.rerun()
@@ -547,6 +576,13 @@ else:
                             t_idx = df_tasks.index[df_tasks['Task_ID'] == r['Task_ID']][0] + 2
                             update_cell("Tasks", t_idx, 5, ns); st.rerun()
                     with c2:
+                        # INSTRUCTIONS
+                        instr = st.text_area("Client Instructions (Checklist)", r.get('Client_Instructions', ''), key=f"ins_{r['Task_ID']}")
+                        if st.button("💾 Save Instructions", key=f"bins_{r['Task_ID']}"):
+                            t_idx = df_tasks.index[df_tasks['Task_ID'] == r['Task_ID']][0] + 2
+                            update_cell("Tasks", t_idx, 9, instr) # Col 9 is Instructions
+                            st.toast("Saved!")
+                            
                         link = f"{APP_BASE_URL}/?upload_token={r['Upload_Token']}"
                         st.text_input("Upload Link", link, key=f"lk_{r['Task_ID']}")
                     with c3:
@@ -561,7 +597,9 @@ else:
                         if tgt_em:
                             if st.button(f"✉️ Send to {tgt_em}", key=f"em_{r['Task_ID']}"):
                                 subj = f"Action Required: {r['Service_Name']}"
-                                body = f"<p>Please upload documents here:</p><p><a href='{link}'>{link}</a></p>"
+                                # HTML EMAIL WITH INSTRUCTIONS
+                                instr_html = f"<div style='background:#eee;padding:10px;'><b>Instructions:</b><br>{instr.replace(chr(10), '<br>')}</div>" if instr else ""
+                                body = f"<p>Please upload documents here:</p><p><a href='{link}'>{link}</a></p>{instr_html}"
                                 if send_email_as_user(tgt_em, subj, body): st.toast("Sent!")
                         else:
                             st.warning("No contact email found.")
