@@ -39,7 +39,9 @@ ADMIN_EMAIL = "ali@kohani.com"
 SCOPES_GMAIL = [
     'https://www.googleapis.com/auth/gmail.send',
     'https://www.googleapis.com/auth/gmail.readonly',
-    'https://www.googleapis.com/auth/userinfo.email'
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/userinfo.profile',
+    'openid' 
 ]
 SCOPES_DRIVE = [
     "https://www.googleapis.com/auth/spreadsheets",
