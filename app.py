@@ -336,64 +336,103 @@ def render_migration_tool(data):
 
     st.write(f"Found {len(df_old)} rows in Legacy Clients.")
     
-    if st.button("🚀 RUN MIGRATION (With Call History)"):
+    if st.button("🚀 RUN MIGRATION (Batch Mode)"):
+        # 1. Prepare Batch Lists (Memory)
+        batch_entities = []
+        batch_contacts = []
+        batch_relationships = []
+        
         progress = st.progress(0)
-        count = 0
+        total = len(df_old)
+        
+        st.write("Processing data in memory...")
+        
         for i, row in df_old.iterrows():
-            # 1. Create Entity
+            # --- 1. Entity ---
             ent_name = row.get('Name') or "Unknown"
             ent_id = generate_id("E")
-            # Save Entity
-            append_to_sheet("Entities", [ent_id, ent_name, "Unknown", "", "", "", ""])
+            # Structure: ID, Name, Type, FEIN, Formation, State, Drive_ID
+            batch_entities.append([ent_id, ent_name, "Unknown", "", "", "", ""])
             
-            # Capture CRM Status
+            # CRM History Data
             status = row.get('Status', 'New')
             outcome = row.get('Outcome', '')
             last_agent = row.get('Last_Agent', '')
             last_updated = row.get('Last_Updated', '')
             
-            # 2. Create Taxpayer Contact (Primary)
+            # --- 2. Taxpayer Contact ---
             tp_first = row.get('Taxpayer First Name')
             tp_email = row.get('Taxpayer E-mail Address')
-            if tp_first or ent_name: # Ensure we create a contact even if just company name
-                c_id = generate_id("C")
-                # Add Status columns to Contact
-                append_to_sheet("Contacts", [
-                    c_id, 
-                    tp_first if tp_first else ent_name, 
-                    row.get('Taxpayer last name', ''), 
-                    tp_email, 
-                    row.get('Home Telephone', ''), 
-                    "Taxpayer", 
-                    "", # Notes (initial blank)
-                    status, 
-                    outcome, 
-                    last_agent, 
-                    last_updated
-                ])
-                append_to_sheet("Relationships", [ent_id, c_id, "Owner", "100%"])
             
-            # 3. Create Spouse Contact (Secondary - usually Reset status or Same?)
+            # Even if no TP name, we need a contact for the file? 
+            # Let's use the Entity Name as contact name if TP is missing, to preserve phone/email
+            c_name_first = tp_first if tp_first else ent_name
+            
+            c_id = generate_id("C")
+            # Structure: ID, First, Last, Email, Phone, Type, Notes, Status, Outcome, Agent, Updated
+            batch_contacts.append([
+                c_id, 
+                c_name_first, 
+                row.get('Taxpayer last name', ''), 
+                str(tp_email) if tp_email else "", 
+                str(row.get('Home Telephone', '')) if row.get('Home Telephone') else "", 
+                "Taxpayer", 
+                "", # Notes
+                status, 
+                outcome, 
+                last_agent, 
+                last_updated
+            ])
+            
+            # Link TP to Entity
+            batch_relationships.append([ent_id, c_id, "Owner", "100%"])
+            
+            # --- 3. Spouse Contact ---
             sp_first = row.get('Spouse First Name')
             if sp_first:
                 c_id_sp = generate_id("C")
-                append_to_sheet("Contacts", [
+                batch_contacts.append([
                     c_id_sp, 
                     sp_first, 
                     row.get('Spouse last name', ''), 
-                    row.get('Spouse E-mail Address', ''), 
+                    str(row.get('Spouse E-mail Address', '')) if row.get('Spouse E-mail Address') else "", 
                     "", 
                     "Spouse", 
                     "",
-                    "New", "", "", "" # Spouse starts fresh or linked? Keeping fresh for now.
+                    "New", "", "", ""
                 ])
-                append_to_sheet("Relationships", [ent_id, c_id_sp, "Spouse", ""])
+                # Link Spouse to Entity
+                batch_relationships.append([ent_id, c_id_sp, "Spouse", ""])
+        
+        progress.progress(50)
+        
+        # 2. Send to Google Sheets (3 API Calls instead of 2000)
+        client = get_db_client()
+        raw_input = st.secrets["connections"]["gsheets"]["spreadsheet"]
+        sheet_id = raw_input.replace("https://docs.google.com/spreadsheets/d/", "").split("/")[0].strip()
+        sh = client.open_by_key(sheet_id)
+        
+        try:
+            st.write(f"Uploading {len(batch_entities)} Entities...")
+            if batch_entities:
+                sh.worksheet("Entities").append_rows(batch_entities)
             
-            count += 1
-            progress.progress(count / len(df_old))
+            st.write(f"Uploading {len(batch_contacts)} Contacts...")
+            if batch_contacts:
+                sh.worksheet("Contacts").append_rows(batch_contacts)
+                
+            st.write(f"Uploading {len(batch_relationships)} Relationships...")
+            if batch_relationships:
+                sh.worksheet("Relationships").append_rows(batch_relationships)
+                
+            progress.progress(100)
+            st.balloons()
+            st.success("✅ Migration Complete! You saved 2,500+ API calls.")
+            time.sleep(2)
+            st.rerun()
             
-        st.success("Migration Complete! CRM History Preserved.")
-        st.rerun()
+        except Exception as e:
+            st.error(f"Save Error: {e}")
 
 # ==========================================
 # 6. UI: MAIN APP COMPONENTS
