@@ -36,12 +36,9 @@ st.markdown("""
 ADMIN_EMAIL = "ali@kohani.com"
 
 # 1. PASTE YOUR SHARED DRIVE FOLDER ID HERE 👇
-# (Open "00 Client Shared Files" in Drive -> Copy the ID after /folders/ in the URL)
 ROOT_DRIVE_FOLDER_ID = "0AF0LoD230jIaUk9PVA" 
 
-# 2. PASTE YOUR APP URL HERE 👇
-# (Copy from your browser address bar, e.g., "https://kohanicrm.streamlit.app")
-# NO trailing slash "/" at the end.
+# 2. PASTE YOUR APP URL HERE 👇 (No trailing slash)
 APP_BASE_URL = "https://kohani-crm.streamlit.app/" 
 
 
@@ -472,22 +469,33 @@ else:
                 t1, t2, t3 = st.tabs(["Info & Drive", "People", "Services"])
                 with t1:
                     e_idx = df_ent.index[df_ent['ID'] == eid][0] + 2
-                    nt = st.selectbox("Type", ["Individual", "LLC", "S-Corp", "C-Corp"], index=["Individual", "LLC", "S-Corp", "C-Corp"].index(ent.get('Type', 'Individual')))
+                    
+                    # --- TYPE FIX & SAFETY ---
+                    types = ["Individual", "LLC", "S-Corp", "C-Corp", "Partnership", "Non-Profit", "Trust", "Unknown"]
+                    curr_type = ent.get('Type', 'Individual')
+                    if curr_type not in types: curr_type = "Unknown"
+                    nt = st.selectbox("Type", types, index=types.index(curr_type))
+                    
                     nf = st.text_input("FEIN", ent.get('FEIN', ''))
                     if st.button("Update Info"):
                         update_cell("Entities", e_idx, 3, nt)
                         update_cell("Entities", e_idx, 4, nf)
                         st.rerun()
+                    
+                    # --- DRIVE LOGIC (WITH RESET) ---
                     did = ent.get('Drive_Folder_ID')
-                    if not did:
+                    if did and len(str(did)) > 5:
+                        st.success(f"Connected: {did}")
+                        st.markdown(f"[Open Drive Folder](https://drive.google.com/drive/u/0/folders/{did})")
+                        if st.button("❌ Unlink/Reset Folder"):
+                            update_cell("Entities", e_idx, 7, "")
+                            st.rerun()
+                    else:
                         if st.button("📂 Create Shared Folder"):
                             fid = create_drive_folder(f"{ent['Name']} - {eid}")
                             if fid:
                                 update_cell("Entities", e_idx, 7, fid)
                                 st.rerun()
-                    else:
-                        st.success(f"Connected: {did}")
-                        st.markdown(f"[Open Drive Folder](https://drive.google.com/drive/u/0/folders/{did})")
 
                 with t2:
                     if not df_rel.empty:
@@ -542,7 +550,6 @@ else:
                         link = f"{APP_BASE_URL}/?upload_token={r['Upload_Token']}"
                         st.text_input("Upload Link", link, key=f"lk_{r['Task_ID']}")
                     with c3:
-                        # Find Email
                         tgt_em = None
                         if not df_rel.empty:
                             rels = df_rel[df_rel['Entity_ID'] == r['Entity_ID']]
