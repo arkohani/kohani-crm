@@ -1,597 +1,290 @@
+
 import streamlit as st
 import pandas as pd
 import gspread
-from google.oauth2.service_account import Credentials
-from google_auth_oauthlib.flow import Flow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-import base64
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import datetime
-import time
-import socket
-import re
-import uuid
-import io
-import json
-
-# ==========================================
-# 0. CONFIG & SAFETY
-# ==========================================
-socket.setdefaulttimeout(60)
-st.set_page_config(page_title="Kohani CRM", page_icon="🏢", layout="wide")
-
-st.markdown("""
-    <style>
-    #MainMenu {display: none;}
-    header {visibility: hidden;}
-    .stDataFrame { border: 1px solid #ddd; border-radius: 5px; }
-    .status-badge-linked { background-color: #d4edda; color: #155724; padding: 5px 10px; border-radius: 5px; font-weight: bold; border: 1px solid #c3e6cb; }
-    .status-badge-missing { background-color: #f8d7da; color: #721c24; padding: 5px 10px; border-radius: 5px; font-weight: bold; border: 1px solid #f5c6cb; }
-    .task-card { background-color: #ffffff; padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #e0e0e0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    .comment-log { background-color: #f8f9fa; padding: 10px; border-radius: 5px; font-size: 0.9em; max-height: 150px; overflow-y: auto; margin-top: 10px; border: 1px solid #eee;}
+@@ -44,6 +43,7 @@
+    .email-date { font-size: 0.8em; color: #666; }
+    .email-subject { font-weight: bold; color: #004B87; }
+    .email-snippet { font-size: 0.9em; color: #333; }
+    .warning-box { background-color: #fff3cd; color: #856404; padding: 10px; border-radius: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
-# ==========================================
-# 🛑 CONFIGURATION REQUIRED HERE 🛑
-# ==========================================
-ADMIN_EMAIL = "ali@kohani.com"
-ROOT_DRIVE_FOLDER_ID = "0AF0LoD230jIaUk9PVA" # <--- PASTE YOUR FOLDER ID HERE
-APP_BASE_URL = "https://kohani-crm.streamlit.app" 
+@@ -52,7 +52,7 @@
 
-
-SCOPES_GMAIL = [
+SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
-    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.readonly', # Added for searching inbox
+    'https://www.googleapis.com/auth/gmail.readonly', # Required for reading history
+    'https://www.googleapis.com/auth/gmail.settings.basic',
+    'openid',
     'https://www.googleapis.com/auth/userinfo.email',
-    'https://www.googleapis.com/auth/userinfo.profile',
-    'openid'
-]
-SCOPES_DRIVE = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
+@@ -127,15 +127,15 @@ def get_user_signature():
 
-# ==========================================
-# 1. AUTHENTICATION
-# ==========================================
-def get_service_account_creds():
-    if "connections" not in st.secrets:
-        st.error("❌ Secrets missing.")
-        st.stop()
-    secrets_dict = dict(st.secrets["connections"]["gsheets"])
-    if "private_key" in secrets_dict:
-        secrets_dict["private_key"] = secrets_dict["private_key"].replace("\\n", "\n")
-    return Credentials.from_service_account_info(secrets_dict, scopes=SCOPES_DRIVE)
-
-def get_db_client():
-    creds = get_service_account_creds()
-    return gspread.authorize(creds)
-
-def get_drive_service():
-    creds = get_service_account_creds()
-    return build('drive', 'v3', credentials=creds)
-
-def get_auth_flow():
-    return Flow.from_client_config(
-        {
-            "web": {
-                "client_id": st.secrets["client"]["client_id"],
-                "client_secret": st.secrets["client"]["client_secret"],
-                "auth_uri": st.secrets["client"]["auth_uri"],
-                "token_uri": st.secrets["client"]["token_uri"],
-                "redirect_uris": [st.secrets["client"]["redirect_uri"]]
-            }
-        },
-        scopes=SCOPES_GMAIL,
-        redirect_uri=st.secrets["client"]["redirect_uri"]
-    )
-
-def authenticate_user():
-    if "code" in st.query_params:
-        try:
-            code = st.query_params["code"]
-            flow = get_auth_flow()
-            flow.fetch_token(code=code)
-            st.session_state.creds = flow.credentials
-            
-            user_info_service = build('oauth2', 'v2', credentials=st.session_state.creds)
-            user_info = user_info_service.userinfo().get().execute()
-            
-            st.session_state.user_email = user_info.get('email')
-            st.session_state.user_name = user_info.get('name')
-            st.query_params.clear()
-            st.rerun()
-        except Exception as e:
-            st.error(f"Login Error: {e}")
-            return False
-
-    if "creds" in st.session_state:
-        if st.session_state.creds.expired and st.session_state.creds.refresh_token:
-            try:
-                st.session_state.creds.refresh(Request())
-            except:
-                del st.session_state.creds
-                return False
-        return True
-    return False
-
-def get_gmail_service():
-    if "creds" not in st.session_state: return None
-    return build('gmail', 'v1', credentials=st.session_state.creds)
-
-def send_email_as_user(to_email, subject, body_html):
+def search_gmail_messages(query_emails):
+    """
+    Searches the logged-in user's Gmail for emails to/from the provided list.
+    Returns a list of dicts: {id, threadId, subject, snippet, date}
+    Searches the logged-in user's Gmail.
+    Returns: (list_of_emails, error_message)
+    """
+    if not query_emails: return []
+    if not query_emails: return [], "No email addresses to search."
     try:
         service = get_gmail_service()
-        message = MIMEMultipart('alternative')
-        sender = f"{st.session_state.user_name} <{st.session_state.user_email}>"
-        message['to'] = to_email
-        message['from'] = sender
-        if st.session_state.user_email.lower() != ADMIN_EMAIL.lower():
-            message['cc'] = ADMIN_EMAIL
-        message['subject'] = subject
-        part2 = MIMEText(body_html, 'html')
-        message.attach(part2)
-        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        service.users().messages().send(userId='me', body={'raw': raw}).execute()
-        return True
+        # Construct query: from:a@b.com OR to:a@b.com
+        q_parts = [f"from:{e} OR to:{e}" for e in query_emails if e and "@" in e]
+        if not q_parts: return []
+        if not q_parts: return [], "Invalid email format."
+
+        full_query = " OR ".join(q_parts)
+
+@@ -157,11 +157,12 @@ def search_gmail_messages(query_emails):
+                    'date': date_str,
+                    'snippet': snippet
+                })
+        return email_data
+        return email_data, None
     except Exception as e:
-        st.error(f"Gmail Error: {e}")
-        return False
+        # Fail silently or return empty if permission denied/error
+        # print(e) 
+        return []
+        error_str = str(e)
+        if "403" in error_str or "insufficient" in error_str.lower():
+            return [], "PERM_ERROR"
+        return [], f"Gmail API Error: {error_str}"
 
-# ==========================================
-# 2. DATABASE CORE
-# ==========================================
-@st.cache_data(ttl=60) 
-def get_all_data():
-    client = get_db_client()
+def send_email_as_user(to_email, subject, body_text, body_html):
     try:
-        raw_input = st.secrets["connections"]["gsheets"]["spreadsheet"]
-        sheet_id = raw_input.replace("https://docs.google.com/spreadsheets/d/", "").split("/")[0].strip()
-        sh = client.open_by_key(sheet_id)
-        tabs = ['Entities', 'Contacts', 'Relationships', 'Services_Settings', 
-                'Services_Assigned', 'Tasks', 'App_Logs', 'Templates', 'Clients']
-        data = {}
-        for t in tabs:
-            try:
-                ws = sh.worksheet(t)
-                vals = ws.get_all_values()
-                if vals: data[t] = pd.DataFrame(vals[1:], columns=vals[0])
-                else: data[t] = pd.DataFrame()
-            except: data[t] = pd.DataFrame()
-        return data
-    except Exception as e:
-        st.error(f"DB Load Error: {e}")
-        return {}
-
-def append_to_sheet(sheet_name, row_data):
-    client = get_db_client()
-    raw_input = st.secrets["connections"]["gsheets"]["spreadsheet"]
-    sh = client.open_by_key(raw_input.replace("https://docs.google.com/spreadsheets/d/", "").split("/")[0].strip())
-    sh.worksheet(sheet_name).append_row(row_data)
-    get_all_data.clear()
-
-def update_cell(sheet_name, row_idx, col_idx, value):
-    client = get_db_client()
-    raw_input = st.secrets["connections"]["gsheets"]["spreadsheet"]
-    sh = client.open_by_key(raw_input.replace("https://docs.google.com/spreadsheets/d/", "").split("/")[0].strip())
-    sh.worksheet(sheet_name).update_cell(row_idx, col_idx, value)
-    get_all_data.clear()
-
+@@ -195,7 +196,6 @@ def send_email_as_user(to_email, subject, body_text, body_html):
+# 3. DATABASE FUNCTIONS & HELPERS
 # ==========================================
-# 3. DRIVE & UPLOAD
-# ==========================================
-def create_drive_folder(folder_name):
-    if not ROOT_DRIVE_FOLDER_ID:
-        st.error("ADMIN ERROR: ROOT_DRIVE_FOLDER_ID not set in code.")
-        return None
-    service = get_drive_service()
-    file_metadata = {
-        'name': folder_name,
-        'mimeType': 'application/vnd.google-apps.folder',
-        'parents': [ROOT_DRIVE_FOLDER_ID]
-    }
-    try:
-        file = service.files().create(body=file_metadata, fields='id', supportsAllDrives=True).execute()
-        return file.get('id')
-    except Exception as e:
-        st.error(f"Drive Error: {e}")
-        return None
+def normalize_phone(phone):
+    """Strips everything except digits to allow loose matching."""
+    if not phone: return ""
+    return re.sub(r'\D', '', str(phone))
 
-def upload_file_to_drive(uploaded_file, folder_id):
-    try:
-        service = get_drive_service()
-        file_metadata = {'name': uploaded_file.name, 'parents': [folder_id]}
-        fh = io.BytesIO(uploaded_file.getvalue())
-        media = MediaIoBaseUpload(fh, mimetype=uploaded_file.type, resumable=True)
-        service.files().create(body=file_metadata, media_body=media, fields='id', supportsAllDrives=True).execute()
-        return True
-    except: return False
+@@ -221,6 +221,7 @@ def get_data(worksheet_name="Clients"):
+            ws = sh.worksheet(worksheet_name)
+        except:
+            if worksheet_name == "Templates": return pd.DataFrame(columns=['Type', 'Subject', 'Body'])
+            # If Reference is missing, return empty but don't crash
+            if worksheet_name == "Reference": return pd.DataFrame()
+            return pd.DataFrame()
 
-def render_public_upload_portal(token):
-    st.markdown("## 📤 Client Portal")
-    data = get_all_data()
-    df_tasks = data.get('Tasks', pd.DataFrame())
-    
-    if df_tasks.empty or 'Upload_Token' not in df_tasks.columns:
-        st.error("System error."); return
+@@ -239,13 +240,22 @@ def get_data(worksheet_name="Clients"):
+        df = pd.DataFrame(rows, columns=unique_headers)
 
-    task = df_tasks[df_tasks['Upload_Token'] == token]
-    if task.empty: st.error("⚠️ Invalid link."); return
-        
-    task_row = task.iloc[0]
-    entity_id = task_row['Entity_ID']
-    service_name = task_row['Service_Name']
-    
-    st.info(f"Task: **{service_name}**")
-    
-    instr = task_row.get('Client_Instructions', '')
-    saved_state_str = task_row.get('Client_Checklist_State', '')
-    checked_items = []
-    if saved_state_str:
-        try: checked_items = json.loads(saved_state_str)
-        except: checked_items = []
-        
-    new_checked_items = []
-    if instr:
-        st.write("### 📋 Your Checklist")
-        st.caption("Check items as you complete them and click 'Save Progress'.")
-        lines = [x.strip() for x in instr.split('\n') if x.strip()]
-        for line in lines:
-            is_checked = line in checked_items
-            if st.checkbox(line, value=is_checked, key=f"chk_{line[:15]}"):
-                new_checked_items.append(line)
-        if st.button("💾 Save Checklist Progress"):
-            t_idx = df_tasks.index[df_tasks['Upload_Token'] == token][0] + 2
-            update_cell("Tasks", t_idx, 11, json.dumps(new_checked_items))
-            st.toast("Progress Saved!"); time.sleep(1); st.rerun()
-
-    df_ent = data.get('Entities')
-    entity = df_ent[df_ent['ID'] == entity_id].iloc[0]
-    drive_id = entity.get('Drive_Folder_ID')
-    
-    if not drive_id: st.warning("Folder not connected."); return
-
-    st.write("### 📤 Upload Files")
-    files = st.file_uploader("Select files", accept_multiple_files=True)
-    if st.button("🚀 Upload Files", type="primary"):
-        if files:
-            with st.status("Uploading..."):
-                for f in files: upload_file_to_drive(f, drive_id)
-            st.balloons(); st.success("✅ Files uploaded!")
-    
-    st.write("---")
-    if task_row['Status'] != 'Done':
-        if st.button("✅ I have finished everything"):
-            t_idx = df_tasks.index[df_tasks['Upload_Token'] == token][0] + 2
-            update_cell("Tasks", t_idx, 5, "Done")
-            st.success("Thank you! The team has been notified.")
-    else:
-        st.success("✅ Task Complete.")
-
-# ==========================================
-# 4. AUTOMATION
-# ==========================================
-def generate_id(prefix): return f"{prefix}-{str(uuid.uuid4())[:8]}"
-
-def run_daily_automation(data, force=False):
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
-    df_logs = data.get('App_Logs', pd.DataFrame())
-    if not force and not df_logs.empty and df_logs['Timestamp'].str.contains(today).any(): return 
+        if worksheet_name == "Clients":
+            # Map standard columns if they don't exist exactly
+            if 'Notes' not in df.columns:
+                # Try to find a history column
+                for c in df.columns:
+                    if 'history' in c.lower() or 'note' in c.lower():
+                        df.rename(columns={c: 'Notes'}, inplace=True)
+                        break
             
-    df_services = data.get('Services_Settings', pd.DataFrame())
-    df_assigned = data.get('Services_Assigned', pd.DataFrame())
-    df_tasks = data.get('Tasks', pd.DataFrame())
-    new_tasks = []
-    
-    if not df_services.empty and not df_assigned.empty:
-        for _, assign in df_assigned.iterrows():
-            s_name = assign['Service_Name']; e_id = assign['Entity_ID']
-            rule = df_services[df_services['Service_Name'] == s_name]
-            if not rule.empty:
-                freq = rule.iloc[0]['Frequency']
-                due_day = int(rule.iloc[0].get('Due_Rule_Days', 15))
-                now = datetime.datetime.now()
-                due_str = ""
-                if freq == "Monthly":
-                    nm = now.month + 1 if now.month < 12 else 1
-                    ny = now.year if now.month < 12 else now.year + 1
-                    due_str = f"{ny}-{nm:02d}-{due_day:02d}"
-                elif freq == "Quarterly":
-                    due_str = (now + datetime.timedelta(days=30)).strftime("%Y-%m-%d")
-                elif freq == "Annually":
-                    tm = 3 if any(x in s_name for x in ["1120-S", "1065", "Partnership", "S-Corp"]) else 4
-                    deadline = datetime.datetime(now.year, tm, due_day)
-                    due_str = deadline.strftime("%Y-%m-%d") if now < deadline else f"{now.year+1}-{tm:02d}-{due_day:02d}"
-                elif freq == "One-Time":
-                    due_str = (now + datetime.timedelta(days=15)).strftime("%Y-%m-%d")
-                if due_str:
-                    dup = False
-                    if not df_tasks.empty:
-                        mask = (df_tasks['Entity_ID'] == e_id) & (df_tasks['Service_Name'] == s_name) & (df_tasks['Due_Date'] == due_str)
-                        if not df_tasks[mask].empty: dup = True
-                    if not dup:
-                        # Append 12 columns (ID, Entity, Service, Due, Status, Token, Notified, Docs, ClientInstr, InternalFlow, ClientState, Comments)
-                        new_tasks.append([generate_id("T"), e_id, s_name, due_str, "Not Started", str(uuid.uuid4()), "", "", "", "", "", ""])
-    
-    if new_tasks:
-        for t in new_tasks: append_to_sheet("Tasks", t)
-        append_to_sheet("App_Logs", [datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "Generated Tasks", f"Count: {len(new_tasks)}"])
-        st.toast(f"Generated {len(new_tasks)} tasks")
-    else:
-        if force: st.toast("No new tasks.")
-        append_to_sheet("App_Logs", [datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "Daily Check", "No new tasks"])
+            required_cols = ['Status', 'Outcome', 'Internal_Flag', 'Notes', 'Last_Agent', 'Last_Updated', 'Gender', 'Spouse E-mail Address']
+            for col in required_cols:
+                if col not in df.columns: df[col] = ""
+            df['Status'] = df['Status'].replace("", "New")
 
-# ==========================================
-# 5. UI: MIGRATION
-# ==========================================
-def render_migration_tool(data):
-    st.subheader("Migration")
-    df_old = data.get('Clients')
-    if not df_old.empty:
-        st.write(f"Found {len(df_old)} legacy rows.")
-        if st.button("🚀 Run Batch Migration"):
-            batch_e = []; batch_c = []; batch_r = []
-            for i, row in df_old.iterrows():
-                eid = generate_id("E"); nm = row.get('Name') or "Unknown"
-                batch_e.append([eid, nm, "Unknown", "", "", "", ""])
-                cid = generate_id("C"); tp_n = row.get('Taxpayer First Name') or nm
-                batch_c.append([cid, tp_n, row.get('Taxpayer last name', ''), row.get('Taxpayer E-mail Address', ''), row.get('Home Telephone', ''), "Taxpayer", "", row.get('Status', 'New'), row.get('Outcome', ''), row.get('Last_Agent', ''), row.get('Last_Updated', '')])
-                batch_r.append([eid, cid, "Owner", "100%"])
-            cl = get_db_client()
-            sh = cl.open_by_key(st.secrets["connections"]["gsheets"]["spreadsheet"].split("/")[5])
-            if batch_e: sh.worksheet("Entities").append_rows(batch_e)
-            if batch_c: sh.worksheet("Contacts").append_rows(batch_c)
-            if batch_r: sh.worksheet("Relationships").append_rows(batch_r)
-            st.success("Done!"); st.rerun()
+        return df
+    except Exception as e:
+        st.error(f"DB Error ({worksheet_name}): {e}")
+        return pd.DataFrame()
 
-# ==========================================
-# 6. MAIN APP
-# ==========================================
-if "upload_token" in st.query_params:
-    render_public_upload_portal(st.query_params["upload_token"])
-    st.stop()
+def update_data(df, worksheet_name="Clients"):
+@@ -330,11 +340,13 @@ def render_client_card_editor(df, df_ref, templates, client_id):
+    client = df.loc[idx]
 
-if not authenticate_user():
-    c1, c2, c3 = st.columns([1,2,1])
-    with c2:
-        st.title("Kohani Practice Management")
-        flow = get_auth_flow()
-        auth_url, _ = flow.authorization_url(prompt='consent')
-        st.link_button("🔵 Sign in with Google", auth_url, type="primary")
-else:
-    data_dict = get_all_data()
-    run_daily_automation(data_dict) 
+    # ------------------------------------
+    # MANUAL REFERENCE SEARCH UI (Feature #3)
+    # MANUAL REFERENCE SEARCH UI (Fixed)
+    # ------------------------------------
+    if not df_ref.empty:
+        with st.sidebar.expander("🔎 Manual Reference Search", expanded=False):
+            st.caption("Check the Reference sheet for contact info.")
+    with st.sidebar.expander("🔎 Manual Reference Search", expanded=True):
+        if df_ref.empty:
+            st.warning("⚠️ Reference sheet is empty or not found. Please check tab name 'Reference'.")
+        else:
+            st.caption(f"Searching {len(df_ref)} rows in 'Reference'...")
+            ref_search = st.text_input("Type name or phone:", key="manual_ref_search")
+            if ref_search:
+                # Basic search across all columns in Ref
+@@ -343,11 +355,10 @@ def render_client_card_editor(df, df_ref, templates, client_id):
+                if not ref_hits.empty:
+                    st.write(f"Found {len(ref_hits)} matches:")
+                    for _, r_row in ref_hits.iterrows():
+                        # Try to display something useful
+                        disp_str = " | ".join([str(val) for val in r_row.values if str(val)])
+                        st.text_area("Match", disp_str[:200], height=60)
+                        st.text_area("Match", disp_str[:200], height=80)
+                else:
+                    st.warning("No matches in Reference sheet.")
+                    st.warning("No matches found.")
 
-    with st.sidebar:
-        st.write(f"👤 **{st.session_state.user_name}**")
-        nav = st.radio("Navigation", ["📊 Dashboard", "📞 Call Queue", "🏢 Entities", "👥 Contacts", "✅ Production (Tasks)", "🔒 Admin"])
-        if st.button("Logout"): del st.session_state.creds; st.rerun()
+    with st.container(border=True):
+        # Header
+@@ -373,13 +384,11 @@ def render_client_card_editor(df, df_ref, templates, client_id):
 
-    # --- DASHBOARD ---
-    if nav == "📊 Dashboard":
-        st.title("Practice Dashboard")
-        df_tasks = data_dict.get('Tasks', pd.DataFrame())
-        df_ent = data_dict.get('Entities', pd.DataFrame())
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Active Entities", len(df_ent) if not df_ent.empty else 0)
-        pending = 0
-        if not df_tasks.empty and 'Status' in df_tasks.columns:
-            pending = len(df_tasks[df_tasks['Status'] != 'Done'])
-        c2.metric("Pending Tasks", pending)
-        c3.metric("System Status", "Online 🟢")
-        
-        if not df_tasks.empty and 'Status' in df_tasks.columns:
-            st.subheader("Recently Completed")
-            done = df_tasks[df_tasks['Status'] == 'Done']
-            if not done.empty:
-                df_full = done.merge(df_ent[['ID', 'Name']], left_on='Entity_ID', right_on='ID', how='left')
-                st.dataframe(df_full[['Name', 'Service_Name', 'Due_Date']], use_container_width=True)
+            # Row 3: Contact Info (Phone)
+            st.write("**Contact Info**")
+            
+            current_phone_val = client.get('Home Telephone', '')
 
-    # --- ENTITIES (COMMAND CENTER) ---
-    elif nav == "🏢 Entities":
-        st.title("Entity Command Center")
-        df_ent = data_dict.get('Entities')
-        df_tasks = data_dict.get('Tasks', pd.DataFrame())
-        df_rel = data_dict.get('Relationships')
-        df_con = data_dict.get('Contacts')
-        
-        c1, c2 = st.columns([1, 3])
-        with c1:
-            q = st.text_input("Search Entity")
-            if st.button("➕ New"): st.session_state.new_ent = True
-            if q and not df_ent.empty:
-                disp = df_ent[df_ent['Name'].str.contains(q, case=False, na=False)]
-                for _, r in disp.head(10).iterrows():
-                    if st.button(f"{r['Name']}", key=f"e_{r['ID']}"): st.session_state.ent_id = r['ID']
-        
-        with c2:
-            if st.session_state.get('new_ent'):
-                st.subheader("Create Entity")
-                n_nm = st.text_input("Name")
-                n_tp = st.selectbox("Type", ["Individual", "LLC", "S-Corp"])
-                if st.button("Create"):
-                    append_to_sheet("Entities", [generate_id("E"), n_nm, n_tp, "", "", "", ""])
-                    st.session_state.new_ent = False; st.rerun()
-            elif st.session_state.get('ent_id'):
-                eid = st.session_state.ent_id
-                ent = df_ent[df_ent['ID'] == eid].iloc[0]
-                
-                # --- COMMAND CENTER HEADER ---
-                hc1, hc2 = st.columns([3, 1])
-                with hc1:
-                    st.header(ent['Name'])
-                    st.caption(f"ID: {eid} | Type: {ent.get('Type','Unknown')} | FEIN: {ent.get('FEIN','N/A')}")
-                with hc2:
-                    did = ent.get('Drive_Folder_ID')
-                    if did and len(str(did)) > 5:
-                        st.markdown(f"""<div class="status-badge-linked">✅ Drive Linked</div><br><a href="https://drive.google.com/drive/u/0/folders/{did}" target="_blank">📂 Open Folder</a>""", unsafe_allow_html=True)
-                        if st.checkbox("Unlink"):
-                             if st.button("❌ Remove Link"): 
-                                e_idx = df_ent.index[df_ent['ID'] == eid][0] + 2
-                                update_cell("Entities", e_idx, 7, ""); st.rerun()
+            # --- AUTO REFERENCE MATCHING ---
+            found_ref_phone = None
+            if (not current_phone_val or len(str(current_phone_val)) < 5) and not df_ref.empty:
+                # Dynamic Column Identification
+                ref_cols = [str(c).lower().strip() for c in df_ref.columns]
+                phone_keywords = ['phone', 'mobile', 'cell', 'tel', 'contact', 'number']
+                name_keywords = ['name', 'client', 'customer', 'taxpayer', 'person']
+@@ -433,11 +442,11 @@ def check_token_match(ref_val):
+        tab_notes, tab_email, tab_gmail_hist = st.tabs(["📝 Notes / History", "✉️ Compose Email", "📧 Gmail History"])
+
+        with tab_notes:
+            st.text_area("History Log", str(client.get('Notes', '')), disabled=True, height=150)
+            st.text_area("History Log", str(client.get('Notes', '')), disabled=True, height=200)
+            new_note = st.text_area("Add Note")
+
+        with tab_gmail_hist:
+            # Feature #4: Unified-ish Inbox (Search logged-in user's gmail)
+            # Feature #4: Unified-ish Inbox with Error Handling
+            st.caption("Searching your Gmail for correspondence with this client...")
+            search_targets = []
+            if new_tp_email: search_targets.append(new_tp_email)
+@@ -446,8 +455,14 @@ def check_token_match(ref_val):
+            if not search_targets:
+                st.info("No email addresses on file to search.")
+            else:
+                gmail_results = search_gmail_messages(search_targets)
+                if gmail_results:
+                gmail_results, error_msg = search_gmail_messages(search_targets)
+                if error_msg:
+                    if error_msg == "PERM_ERROR":
+                        st.error("⚠️ Access Denied: We cannot read your emails yet.")
+                        st.markdown("**Action Required:** Please click 'Logout' in the sidebar and Sign In again to grant the new permissions.")
                     else:
-                        st.markdown("""<div class="status-badge-missing">❌ No Drive</div>""", unsafe_allow_html=True)
-                        if st.button("📂 Create Folder"):
-                            e_idx = df_ent.index[df_ent['ID'] == eid][0] + 2
-                            fid = create_drive_folder(ent['Name'])
-                            if fid: update_cell("Entities", e_idx, 7, fid); st.rerun()
+                        st.error(error_msg)
+                elif gmail_results:
+                    for msg in gmail_results:
+                        st.markdown(f"""
+                        <div class="email-row">
+@@ -460,7 +475,7 @@ def check_token_match(ref_val):
+                    st.write("No emails found in your inbox for these addresses.")
 
-                # --- TABS ---
-                t_tasks, t_people, t_settings = st.tabs(["Active Jobs (PM)", "People & Contacts", "Settings"])
-                
-                # TAB 1: ACTIVE JOBS (PM)
-                with t_tasks:
-                    # Manual Task Button
-                    with st.expander("➕ Add Manual Job"):
-                        m_serv = st.text_input("Job/Task Name (e.g., IRS Notice)")
-                        m_due = st.date_input("Due Date")
-                        if st.button("Add Job"):
-                            append_to_sheet("Tasks", [generate_id("T"), eid, m_serv, str(m_due), "Not Started", str(uuid.uuid4()), "", "", "", "", "", ""])
-                            st.success("Added!"); time.sleep(1); st.rerun()
+        with tab_email:
+            st.caption("Feature: Emails sent here are automatically logged to Notes.")
+            st.caption("Emails sent here are automatically logged to Notes.")
+            email_targets = {}
+            if new_tp_email: email_targets[f"Taxpayer: {new_tp_email}"] = new_tp_email
+            if new_sp_email: email_targets[f"Spouse: {new_sp_email}"] = new_sp_email
+@@ -514,14 +529,9 @@ def check_token_match(ref_val):
+        st.markdown("---")
+        c_out1, c_out2 = st.columns(2)
 
-                    # Task List
-                    if not df_tasks.empty:
-                        my_tasks = df_tasks[df_tasks['Entity_ID'] == eid]
-                        if not my_tasks.empty:
-                            for _, t in my_tasks.iterrows():
-                                with st.expander(f"{t['Service_Name']} | Due: {t['Due_Date']} | {t['Status']}"):
-                                    c_pm1, c_pm2 = st.columns(2)
-                                    
-                                    # Left: Status & Workflow
-                                    with c_pm1:
-                                        t_idx = df_tasks.index[df_tasks['Task_ID'] == t['Task_ID']][0] + 2
-                                        ns = st.selectbox("Status", ["Not Started", "In Progress", "Done"], index=["Not Started", "In Progress", "Done"].index(t['Status']), key=f"ts_{t['Task_ID']}")
-                                        if ns != t['Status']: update_cell("Tasks", t_idx, 5, ns); st.rerun()
-                                        
-                                        # Link
-                                        link = f"{APP_BASE_URL}/?upload_token={t['Upload_Token']}"
-                                        st.text_input("Client Link", link, key=f"ln_{t['Task_ID']}")
-                                        
-                                        # Internal Comments (PM)
-                                        st.write("**📝 Project Notes / Chat**")
-                                        prev_comments = t.get('Internal_Comments', '')
-                                        if prev_comments:
-                                            st.markdown(f'<div class="comment-log">{prev_comments.replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
-                                        
-                                        new_comm = st.text_input("Add comment...", key=f"nc_{t['Task_ID']}")
-                                        if st.button("Post", key=f"bp_{t['Task_ID']}"):
-                                            ts = datetime.datetime.now().strftime("%m/%d %H:%M")
-                                            append = f"<b>[{ts} {st.session_state.user_name}]</b>: {new_comm}"
-                                            final = f"{prev_comments}\n{append}" if prev_comments else append
-                                            update_cell("Tasks", t_idx, 12, final) # Col 12
-                                            st.rerun()
-
-                                    # Right: Checklist
-                                    with c_pm2:
-                                        st.write("**🟢 Client Checklist**")
-                                        instr = st.text_area("Edit Items", t.get('Client_Instructions', ''), height=100, key=f"ti_{t['Task_ID']}")
-                                        if st.button("Save List", key=f"bs_{t['Task_ID']}"):
-                                            update_cell("Tasks", t_idx, 9, instr)
-                                            st.toast("Saved")
-                                        
-                                        # Client Progress
-                                        c_state = t.get('Client_Checklist_State', '')
-                                        if c_state and "[" in c_state:
-                                            try: 
-                                                done_list = json.loads(c_state)
-                                                st.progress(len(done_list)/max(1, len(instr.split('\n'))))
-                                                st.caption(f"Client finished: {', '.join(done_list)}")
-                                            except: pass
-                                        else: st.caption("Client has not started.")
-
-                        else: st.info("No active tasks.")
-                    else: st.info("No tasks in system.")
-
-                # TAB 2: PEOPLE
-                with t_people:
-                    if not df_rel.empty:
-                        for _, r in df_rel[df_rel['Entity_ID'] == eid].iterrows():
-                            c = df_con[df_con['ID'] == r['Contact_ID']]
-                            if not c.empty: st.write(f"👤 {c.iloc[0]['First Name']} {c.iloc[0]['Last Name']} ({r['Role']})")
-                    st.write("---")
-                    search_p = st.text_input("Link Existing Person")
-                    if search_p and not df_con.empty:
-                        found = df_con[df_con['First Name'].str.contains(search_p, case=False, na=False)]
-                        if not found.empty:
-                            sel_p = st.selectbox("Select", found.apply(lambda x: f"{x['First Name']} {x['Last Name']} (ID: {x['ID']})", axis=1))
-                            role = st.selectbox("Role", ["Owner", "Partner", "Officer"])
-                            if st.button("Link"):
-                                append_to_sheet("Relationships", [eid, sel_p.split("(ID: ")[1][:-1], role, ""])
-                                st.success("Linked!"); st.rerun()
-
-                # TAB 3: SETTINGS
-                with t_settings:
-                    e_idx = df_ent.index[df_ent['ID'] == eid][0] + 2
-                    types = ["Individual", "LLC", "S-Corp", "C-Corp", "Partnership", "Non-Profit", "Trust", "Unknown"]
-                    nt = st.selectbox("Type", types, index=types.index(ent.get('Type', 'Individual') if ent.get('Type') in types else 'Unknown'))
-                    if st.button("Update"): update_cell("Entities", e_idx, 3, nt); st.rerun()
-
-    # --- CALL QUEUE & CRM ---
-    elif nav == "📞 Call Queue":
-        st.title("📞 Call Queue")
-        df_con = data_dict.get('Contacts', pd.DataFrame())
-        if df_con.empty: st.warning("No contacts."); st.stop()
-        if st.session_state.get('call_id') is None:
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("🎲 START CALL"): st.session_state.call_id = df_con.sample(1).iloc[0]['ID']; st.rerun()
-            with c2:
-                q = st.text_input("Search Contact")
-                if q:
-                    res = df_con[df_con['First Name'].str.contains(q, case=False, na=False)]
-                    for _, r in res.iterrows():
-                        if st.button(f"Load: {r['First Name']}", key=r['ID']): st.session_state.call_id = r['ID']; st.rerun()
+        # Determine Status Index
+        status_opts = ["Updated File", "Left Message", "Talked", "Wrong Number"]
+        curr_stat = client['Status']
+        if curr_stat not in status_opts: 
+            # If current status is weird (like "New" or "Manager Emailed"), default to first or keep weird if not in list
+            stat_idx = 0 
         else:
-            cid = st.session_state.call_id; row = df_con[df_con['ID'] == cid].iloc[0]; idx = df_con.index[df_con['ID'] == cid][0] + 2
-            with st.container(border=True):
-                st.subheader(f"{row['First Name']} {row['Last Name']}")
-                if st.button("Exit"): st.session_state.call_id = None; st.rerun()
-                note = st.text_area("New Note")
-                if st.button("Save"):
-                    if note: update_cell("Contacts", idx, 7, f"{row.get('Notes','')}\n[{datetime.datetime.now()}] {note}")
-                    st.session_state.call_id = None; st.rerun()
+            stat_idx = status_opts.index(curr_stat)
+        stat_idx = status_opts.index(curr_stat) if curr_stat in status_opts else 0
 
-    # --- CONTACTS ---
-    elif nav == "👥 Contacts":
-        st.title("Contacts Directory")
-        q = st.text_input("Search")
-        if q:
-            df_con = data_dict.get('Contacts', pd.DataFrame())
-            if not df_con.empty:
-                res = df_con[df_con['First Name'].str.contains(q, case=False, na=False)]
-                st.dataframe(res)
+        res = c_out1.selectbox("Call Result", status_opts, index=stat_idx)
 
-    # --- PRODUCTION ---
-    elif nav == "✅ Production (Tasks)":
-        st.title("Production Calendar")
-        df_tasks = data_dict.get('Tasks', pd.DataFrame())
-        df_ent = data_dict.get('Entities', pd.DataFrame())
-        
-        if df_tasks.empty:
-            st.info("No tasks.")
-        else:
-            all_stats = sorted(list(df_tasks['Status'].unique()))
-            f_s = st.multiselect("Filter Status", all_stats, default=[s for s in ["Not Started", "In Progress"] if s in all_stats])
-            df_full = df_tasks.merge(df_ent[['ID', 'Name']], left_on='Entity_ID', right_on='ID', how='left')
-            view = df_full[df_full['Status'].isin(f_s)] if f_s else df_full
+@@ -541,7 +551,7 @@ def check_token_match(ref_val):
+            st.rerun()
+
+        if col_b2.button("💾 SAVE & FINISH", type="primary", use_container_width=True):
+            # Update Data
+            # Prepare Update
+            df.at[idx, 'Taxpayer First Name'] = new_tp_first
+            df.at[idx, 'Spouse First Name'] = new_sp_first
+            df.at[idx, 'Taxpayer last name'] = new_tp_last
+@@ -556,26 +566,32 @@ def check_token_match(ref_val):
+            df.at[idx, 'Last_Agent'] = st.session_state.user_email
+            df.at[idx, 'Last_Updated'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+            # Combine notes
+            # Combine notes & Email Log
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            note_append = ""
             
-            for _, r in view.iterrows():
-                with st.expander(f"📅 {r['Due_Date']} | {r['Name']} | {r['Service_Name']}"):
-                    st.write("**Project Notes:**")
-                    if r.get('Internal_Comments'): st.info(r['Internal_Comments'])
-                    if st.button("Go to Entity Dashboard", key=f"g_{r['Task_ID']}"):
-                        st.session_state.ent_id = r['Entity_ID']
-                        # Set nav manually? Streamlit restriction. Best is to inform user.
-                        st.info("Click '🏢 Entities' in sidebar to manage.")
+            # 1. Add User Note
+            if new_note:
+                note_append += f"\n[{timestamp} {st.session_state.user_email}]: {new_note}"
 
-    # --- ADMIN ---
-    elif nav == "🔒 Admin":
-        st.title("Admin")
-        t1, t2 = st.tabs(["Services", "Automation"])
-        with t1: st.dataframe(data_dict.get('Services_Settings'))
-        with t2:
-            if st.button("⚡ Force Automation"): run_daily_automation(data_dict, force=True)
+            # 2. Process Email
+            if enable_email and selected_email_address:
+                if send_email_as_user(selected_email_address, subj, final_text, final_html):
+                    st.toast(f"Email sent to {selected_email_address}")
+                    # Feature #4 (Option B): Log Email to Notes
+                    note_append += f"\n[EMAIL SENT by {st.session_state.user_email}]\nSubject: {subj}\nTo: {selected_email_address}\n"
+                    # Log Email to Notes
+                    note_append += f"\n----------------------------------------\n[📧 EMAIL SENT] {timestamp}\nTo: {selected_email_address}\nSubject: {subj}\n----------------------------------------"
+                else:
+                    st.error("Failed to send email.")
+
+            if note_append:
+                df.at[idx, 'Notes'] = str(client.get('Notes', '')) + note_append
+                current_notes = str(client.get('Notes', ''))
+                df.at[idx, 'Notes'] = current_notes + note_append
+
+            with st.spinner("Saving..."):
+            with st.spinner("Saving to Google Sheets..."):
+                update_data(df, "Clients")
+
+            if dec == "Yes": st.balloons()
+            st.success("Saved!")
+            st.success("Saved Successfully!")
+            time.sleep(1)
+            st.session_state.current_id = None
+            st.session_state.admin_current_id = None
+@@ -594,14 +610,12 @@ def render_team_view(df, df_ref, templates, user_email):
+            with st.container(border=True):
+                st.write("### 📞 Call Queue")
+
+                # Feature #2: Ensure we only pick explicitly 'New' statuses to avoid recalling people
+                # Exclude worked statuses
+                queue = df[df['Status'] == 'New']
+                st.metric("New Leads Remaining", len(queue))
+
+                if not queue.empty:
+                    if st.button("🎲 START CALL (Prioritize Phones)", type="primary", use_container_width=True):
+                        # Feature #1: Prioritize Phone Numbers
+                        # Check if phone has at least 7 digits
+                        queue['clean_phone'] = queue['Home Telephone'].apply(normalize_phone)
+                        with_phone = queue[queue['clean_phone'].str.len() > 6]
+                        no_phone = queue[queue['clean_phone'].str.len() <= 6]
+@@ -621,16 +635,9 @@ def render_team_view(df, df_ref, templates, user_email):
+                st.write("### 🔎 Find Client (Deep Search)")
+                search = st.text_input("Search Name, Phone, Email, or Notes")
+                if search:
+                    # Feature #5: Normalize search term for phone logic + Search Notes
+                    search_norm = normalize_phone(search)
+                    
+                    # Create normalized phone col for search purposes only
+                    df['search_phone'] = df['Home Telephone'].apply(normalize_phone)
+
+                    # Logic: 
+                    # 1. Text match on Name/Email/Notes
+                    # 2. IF search term has digits, compare against normalized phone
+                    
+                    mask = (
+                        df['Name'].astype(str).str.contains(search, case=False, na=False) |
+                        df['Taxpayer E-mail Address'].astype(str).str.contains(search, case=False, na=False) |
+@@ -813,8 +820,8 @@ def render_admin_view(df, df_ref, templates, user_email):
+                                        # Log to notes
+                                        existing_notes = str(df.at[idx, 'Notes'])
+                                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                                        log_entry = f"[{timestamp} {st.session_state.user_email}]: {new_note}\n[EMAIL SENT] To: {selected_email_addr}"
+                                        df.at[idx, 'Notes'] = f"{existing_notes}\n{log_entry}"
+                                        log_entry = f"\n[{timestamp} {st.session_state.user_email}]: {new_note}\n----------------\n[📧 MANAGER EMAIL SENT] {timestamp}\nTo: {selected_email_addr}"
+                                        df.at[idx, 'Notes'] = f"{existing_notes}{log_entry}"
+
+                                        update_data(df, "Clients")
